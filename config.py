@@ -58,3 +58,10 @@ LABELS_FILE = os.path.join(TRAINING_DIR, "labels.json")
 # --- Entrenamiento ---
 TRAINING_AUTO_SAVE = True  # Guardar automaticamente imagenes de matriculas para entrenamiento
 TRAINING_MAX_IMAGES = 5000  # Maximo de imagenes guardadas para entrenamiento
+
+# Captura automatica de frames dificiles para entrenamiento
+TRAINING_CAPTURE_FAILED = True      # Guardar frames donde OCR no pudo leer o fallo validacion
+TRAINING_CAPTURE_LOW_CONF = True    # Guardar frames con confianza baja
+TRAINING_LOW_CONF_THRESHOLD = 0.65  # Por debajo de esto se considera "baja confianza"
+TRAINING_RANDOM_SAMPLE_RATE = 0.1   # 10% de lecturas correctas se guardan aleatoriamente
+TRAINING_MAX_DIFFICULT_PER_MIN = 10 # Maximo de frames dificiles guardados por minuto (evitar spam)

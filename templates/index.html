@@ -142,7 +142,14 @@
         <!-- Corregir lecturas -->
         <div class="training-corrections">
             <h3>Corregir lecturas del OCR</h3>
-            <p class="help-text">Revisa estas matriculas detectadas y corrige los errores de lectura.</p>
+            <p class="help-text">Revisa estas imagenes capturadas automaticamente. Escribe el texto correcto o descarta las que no sean matriculas.</p>
+            <div class="training-filters">
+                <button class="btn-filter active" data-filter="">Todos</button>
+                <button class="btn-filter" data-filter="ocr_failed">OCR fallo</button>
+                <button class="btn-filter" data-filter="invalid_format">Formato invalido</button>
+                <button class="btn-filter" data-filter="low_confidence">Baja confianza</button>
+                <button class="btn-filter" data-filter="random_sample">Muestreo</button>
+            </div>
             <div id="corrections-list"></div>
         </div>
 

@@ -349,22 +349,41 @@ document.getElementById('btn-save-settings').addEventListener('click', () => {
 });
 
 // --- Training ---
+let currentTrainingFilter = '';
+
+const REASON_LABELS = {
+    'ocr_failed': 'OCR fallo',
+    'invalid_format': 'Formato invalido',
+    'low_confidence': 'Baja confianza',
+    'random_sample': 'Muestreo aleatorio',
+    'manual': 'Manual',
+};
+
 function loadTraining() {
     // Stats
     fetch('/api/training/stats')
         .then(r => r.json())
         .then(data => {
+            const byReason = data.by_reason || {};
+            const reasonBreakdown = Object.entries(byReason)
+                .map(([k, v]) => `${REASON_LABELS[k] || k}: ${v}`)
+                .join(', ');
             document.getElementById('training-stats').innerHTML = `
                 <strong>Dataset:</strong> ${data.total_images || 0} imagenes
-                (${data.verified || 0} verificadas, ${data.unverified || 0} pendientes)
-                | <strong>Reglas aprendidas:</strong> ${data.correction_rules || 0}
-                | Max: ${data.max_images || 5000}
+                (${data.verified || 0} verificadas, ${data.unverified || 0} pendientes)<br>
+                <strong>Reglas aprendidas:</strong> ${data.correction_rules || 0}
+                | Max: ${data.max_images || 5000}<br>
+                <span style="font-size:0.85em;color:var(--text-secondary)">${reasonBreakdown || 'Sin datos'}</span>
             `;
         })
         .catch(() => {});
 
-    // Unverified items
-    fetch('/api/training/unverified')
+    loadUnverified(currentTrainingFilter);
+}
+
+function loadUnverified(reasonFilter) {
+    const url = '/api/training/unverified?limit=30' + (reasonFilter ? '&reason=' + reasonFilter : '');
+    fetch(url)
         .then(r => r.json())
         .then(items => {
             const container = document.getElementById('corrections-list');
@@ -374,16 +393,23 @@ function loadTraining() {
             }
             container.innerHTML = '';
             items.forEach(item => {
+                const reason = item.reason || 'manual';
+                const reasonLabel = REASON_LABELS[reason] || reason;
                 const div = document.createElement('div');
                 div.className = 'correction-item';
+                div.id = 'item-' + item.id;
                 div.innerHTML = `
                     <img src="/api/training/image/${item.filename}" alt="Matricula">
                     <div class="correction-info">
-                        <div>OCR leyo: <span class="correction-ocr">${item.ocr_text || '???'}</span></div>
-                        <div style="color:var(--text-secondary);font-size:0.8em">Confianza: ${(item.confidence * 100).toFixed(0)}%</div>
+                        <div>
+                            <span class="reason-badge reason-${reason}">${reasonLabel}</span>
+                            OCR: <span class="correction-ocr">${item.ocr_text || '???'}</span>
+                            <span style="color:var(--text-secondary);font-size:0.8em">(${(item.confidence * 100).toFixed(0)}%)</span>
+                        </div>
                         <div class="correction-input">
-                            <input type="text" id="correct-${item.id}" placeholder="Texto correcto" value="${item.ocr_text || ''}" maxlength="12">
+                            <input type="text" id="correct-${item.id}" placeholder="Escribe matricula correcta" value="${item.ocr_text || ''}" maxlength="12">
                             <button class="btn btn-primary" onclick="submitCorrection('${item.id}')">OK</button>
+                            <button class="btn-discard" onclick="discardImage('${item.id}')">Descartar</button>
                         </div>
                     </div>
                 `;
@@ -392,6 +418,16 @@ function loadTraining() {
         })
         .catch(() => {});
 }
+
+// Filter buttons
+document.querySelectorAll('.btn-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTrainingFilter = btn.dataset.filter;
+        loadUnverified(currentTrainingFilter);
+    });
+});
 
 function submitCorrection(imageId) {
     const input = document.getElementById('correct-' + imageId);
@@ -404,7 +440,26 @@ function submitCorrection(imageId) {
         body: JSON.stringify({ image_id: imageId, corrected_text: text })
     })
     .then(r => r.json())
-    .then(() => loadTraining())
+    .then(() => {
+        // Eliminar visualmente el item corregido
+        const item = document.getElementById('item-' + imageId);
+        if (item) item.remove();
+        loadTraining();
+    })
+    .catch(() => {});
+}
+
+function discardImage(imageId) {
+    fetch('/api/training/discard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: imageId })
+    })
+    .then(r => r.json())
+    .then(() => {
+        const item = document.getElementById('item-' + imageId);
+        if (item) item.remove();
+    })
     .catch(() => {});
 }
 

@@ -511,6 +511,54 @@ input[type="range"] {
     text-transform: uppercase;
 }
 
+.training-filters {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.btn-filter {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 4px 10px;
+    border-radius: 15px;
+    cursor: pointer;
+    font-size: 0.8em;
+}
+
+.btn-filter.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.reason-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.7em;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.reason-ocr_failed { background: #e53935; color: white; }
+.reason-invalid_format { background: #ff9800; color: white; }
+.reason-low_confidence { background: #ffc107; color: #333; }
+.reason-random_sample { background: #4caf50; color: white; }
+.reason-manual { background: #2196f3; color: white; }
+
+.btn-discard {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8em;
+}
+
 /* --- Responsive --- */
 @media (max-width: 480px) {
     .navbar { flex-direction: column; gap: 8px; }

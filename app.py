@@ -12,12 +12,18 @@ import config
 from core.camera import Camera
 from core.detector import detect_all_plates, draw_detections
 from core.preprocessor import preprocess_for_easyocr
-from core.ocr_engine import read_plate_cached, plate_cache
+from core.ocr_engine import read_plate, read_plate_cached, plate_cache
 from core.plate_validator import validate_plate, normalize_plate
 from core.alert_manager import AlertManager
 from core.detection_logger import DetectionLogger
 from core.gps_tracker import GPSTracker
-from training.collector import TrainingCollector
+from training.collector import (
+    TrainingCollector,
+    CAPTURE_REASON_FAILED,
+    CAPTURE_REASON_INVALID,
+    CAPTURE_REASON_LOW_CONF,
+    CAPTURE_REASON_RANDOM,
+)
 from training.trainer import PlateTrainer
 
 # --- Inicializar Flask ---
@@ -73,16 +79,54 @@ def detection_loop():
                 texts.append("")
                 continue
 
-            # Leer con OCR + cache de deduplicacion
-            validation, confidence = read_plate_cached(processed, validate_plate)
+            # Leer texto crudo del OCR (sin cache ni validacion)
+            raw_text, confidence = read_plate(processed)
 
-            if validation is None:
+            # --- CAPTURA AUTOMATICA DE FRAMES DIFICILES ---
+            # Caso 1: OCR no pudo leer nada -> guardar para entrenamiento
+            if raw_text is None and config.TRAINING_CAPTURE_FAILED:
+                training_collector.save_difficult_frame(
+                    plate_img, None, 0, CAPTURE_REASON_FAILED
+                )
                 texts.append("")
                 continue
 
+            # Validar formato espanol
+            validation = validate_plate(raw_text)
+
+            # Caso 2: Leyo algo pero formato invalido -> guardar
+            if validation is None:
+                if config.TRAINING_CAPTURE_FAILED:
+                    training_collector.save_difficult_frame(
+                        plate_img, raw_text, confidence, CAPTURE_REASON_INVALID
+                    )
+                texts.append("")
+                continue
+
+            # Caso 3: Confianza baja -> guardar para revision manual
+            if confidence < config.TRAINING_LOW_CONF_THRESHOLD and config.TRAINING_CAPTURE_LOW_CONF:
+                training_collector.save_difficult_frame(
+                    plate_img, raw_text, confidence, CAPTURE_REASON_LOW_CONF
+                )
+
+            # Caso 4: Lectura correcta, muestreo aleatorio (variedad de ejemplos)
+            elif training_collector.should_random_sample():
+                training_collector.save_difficult_frame(
+                    plate_img, raw_text, confidence, CAPTURE_REASON_RANDOM
+                )
+
+            # --- PROCESAMIENTO NORMAL ---
             plate_text = validation["plate"]
             plate_normalized = validation["normalized"]
             plate_type = validation["type"]
+
+            # Comprobar cache deduplicacion
+            from core.ocr_engine import plate_cache as _pc
+            if _pc.contains(plate_normalized):
+                texts.append(plate_text)
+                continue
+            _pc.add(plate_normalized)
+
             texts.append(plate_text)
 
             # Obtener GPS
@@ -301,7 +345,8 @@ def training_stats():
 @app.route("/api/training/unverified")
 def training_unverified():
     limit = request.args.get("limit", 20, type=int)
-    items = training_collector.get_unverified(limit)
+    reason = request.args.get("reason", None)
+    items = training_collector.get_unverified(limit, reason_filter=reason)
     return jsonify(items)
 
 
@@ -357,6 +402,17 @@ def training_upload():
         return jsonify({"success": True, "image_id": image_id})
 
     return jsonify({"error": "No se pudo guardar (limite alcanzado?)"}), 500
+
+
+@app.route("/api/training/discard", methods=["POST"])
+def training_discard():
+    """Descarta una imagen de entrenamiento (no es matricula, basura, etc.)."""
+    data = request.get_json()
+    image_id = data.get("image_id", "")
+    if not image_id:
+        return jsonify({"error": "image_id requerido"}), 400
+    ok = training_collector.discard_image(image_id)
+    return jsonify({"success": ok})
 
 
 @app.route("/api/training/image/<filename>")
