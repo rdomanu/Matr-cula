@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>MatriScan - Lector de Matriculas</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- Barra de navegacion -->
+    <nav class="navbar">
+        <div class="nav-brand">MatriScan</div>
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-section="dashboard">Monitor</button>
+            <button class="nav-tab" data-section="watchlist">Vigilancia</button>
+            <button class="nav-tab" data-section="history">Historial</button>
+            <button class="nav-tab" data-section="settings">Ajustes</button>
+        </div>
+    </nav>
+
+    <!-- Alerta emergente -->
+    <div id="alert-banner" class="alert-banner hidden">
+        <div class="alert-content">
+            <span class="alert-icon">!!</span>
+            <div class="alert-text">
+                <strong id="alert-plate"></strong>
+                <span id="alert-alias"></span>
+            </div>
+            <button id="alert-dismiss" class="btn-dismiss">X</button>
+        </div>
+    </div>
+
+    <!-- SECCION: Dashboard -->
+    <section id="section-dashboard" class="section active">
+        <div class="controls">
+            <button id="btn-start" class="btn btn-start">START</button>
+            <button id="btn-stop" class="btn btn-stop hidden">STOP</button>
+            <div class="stats">
+                <span id="stat-count">0</span> matriculas |
+                <span id="stat-fps">0</span> FPS |
+                GPS: <span id="stat-gps">--</span>
+            </div>
+        </div>
+
+        <div class="video-container">
+            <img id="video-feed" src="" alt="Video en vivo">
+            <div id="video-placeholder" class="video-placeholder">
+                Pulsa START para iniciar la camara
+            </div>
+        </div>
+
+        <div class="recent-plates">
+            <h3>Ultimas matriculas detectadas</h3>
+            <div id="plates-list" class="plates-list">
+                <p class="empty-msg">Ninguna matricula detectada aun</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- SECCION: Watchlist -->
+    <section id="section-watchlist" class="section hidden">
+        <h2>Lista de Vigilancia</h2>
+
+        <div class="watchlist-add">
+            <input type="text" id="wl-plate" placeholder="Matricula (ej: 1234 BCD)" maxlength="12">
+            <input type="text" id="wl-alias" placeholder="Alias (ej: Coche de Juan)">
+            <button id="btn-add-plate" class="btn btn-primary">Anadir</button>
+        </div>
+
+        <!-- Resultado busqueda historica al anadir -->
+        <div id="wl-history-result" class="history-result hidden">
+            <h4>Historial de esta matricula:</h4>
+            <div id="wl-history-content"></div>
+        </div>
+
+        <div id="watchlist-items" class="watchlist-items">
+            <p class="empty-msg">No hay matriculas en la lista de vigilancia</p>
+        </div>
+
+        <div class="watchlist-actions">
+            <button id="btn-export-wl" class="btn btn-secondary">Exportar JSON</button>
+            <label class="btn btn-secondary">
+                Importar JSON
+                <input type="file" id="btn-import-wl" accept=".json" hidden>
+            </label>
+        </div>
+    </section>
+
+    <!-- SECCION: Historial -->
+    <section id="section-history" class="section hidden">
+        <h2>Historial de Detecciones</h2>
+
+        <div class="history-search">
+            <input type="text" id="hist-search" placeholder="Buscar matricula...">
+            <button id="btn-search-hist" class="btn btn-primary">Buscar</button>
+            <button id="btn-export-csv" class="btn btn-secondary">Exportar CSV</button>
+        </div>
+
+        <div id="history-results" class="history-table-container">
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>Fecha</th>
+                        <th>Hora</th>
+                        <th>Matricula</th>
+                        <th>Tipo</th>
+                        <th>Ubicacion</th>
+                    </tr>
+                </thead>
+                <tbody id="history-tbody">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="csv-files">
+            <h3>Archivos CSV disponibles</h3>
+            <div id="csv-files-list"></div>
+        </div>
+    </section>
+
+    <!-- SECCION: Ajustes -->
+    <section id="section-settings" class="section hidden">
+        <h2>Configuracion</h2>
+
+        <div class="settings-group">
+            <label>Fuente de camara</label>
+            <select id="set-camera">
+                <option value="0">Camara local (0)</option>
+                <option value="1">Camara secundaria (1)</option>
+                <option value="ip">Camara IP (URL)</option>
+            </select>
+            <input type="text" id="set-camera-url" placeholder="http://192.168.1.5:8080/video" class="hidden">
+        </div>
+
+        <div class="settings-group">
+            <label>FPS de captura</label>
+            <input type="range" id="set-fps" min="3" max="15" value="10">
+            <span id="set-fps-value">10</span>
+        </div>
+
+        <div class="settings-group">
+            <label>Cooldown de alertas (segundos)</label>
+            <input type="number" id="set-cooldown" min="30" max="3600" value="300">
+        </div>
+
+        <div class="settings-group">
+            <label>
+                <input type="checkbox" id="set-log-all" checked>
+                Registrar todas las matriculas en CSV
+            </label>
+        </div>
+
+        <div class="settings-group">
+            <label>
+                <input type="checkbox" id="set-sound" checked>
+                Sonido de alerta activo
+            </label>
+        </div>
+
+        <button id="btn-save-settings" class="btn btn-primary">Guardar Ajustes</button>
+
+        <div class="settings-info">
+            <h3>Estado del sistema</h3>
+            <div id="system-status"></div>
+        </div>
+    </section>
+
+    <audio id="alert-sound" preload="auto">
+        <source src="/static/sounds/alert.wav" type="audio/wav">
+    </audio>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

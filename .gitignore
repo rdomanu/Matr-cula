@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.env
+
+# Datos locales
+data/detections_*.csv
+data/alerts/
+data/training/plates/
+data/training/labels.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Modelos entrenados
+*.pth
+*.onnx
+*.pt
