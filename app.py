@@ -17,6 +17,8 @@ from core.plate_validator import validate_plate, normalize_plate
 from core.alert_manager import AlertManager
 from core.detection_logger import DetectionLogger
 from core.gps_tracker import GPSTracker
+from training.collector import TrainingCollector
+from training.trainer import PlateTrainer
 
 # --- Inicializar Flask ---
 app = Flask(__name__)
@@ -28,6 +30,8 @@ camera = Camera()
 alert_manager = AlertManager()
 detection_logger = DetectionLogger()
 gps_tracker = GPSTracker()
+training_collector = TrainingCollector()
+plate_trainer = PlateTrainer()
 
 # --- Estado global ---
 detection_running = False
@@ -286,6 +290,82 @@ def update_settings():
         current_settings["camera_source"] = data["camera_source"]
 
     return jsonify({"success": True})
+
+
+# --- API: Training ---
+@app.route("/api/training/stats")
+def training_stats():
+    return jsonify(plate_trainer.get_training_stats())
+
+
+@app.route("/api/training/unverified")
+def training_unverified():
+    limit = request.args.get("limit", 20, type=int)
+    items = training_collector.get_unverified(limit)
+    return jsonify(items)
+
+
+@app.route("/api/training/correct", methods=["POST"])
+def training_correct():
+    data = request.get_json()
+    image_id = data.get("image_id", "")
+    corrected_text = data.get("corrected_text", "")
+    if not image_id or not corrected_text:
+        return jsonify({"error": "image_id y corrected_text requeridos"}), 400
+    ok = training_collector.correct_label(image_id, corrected_text)
+    return jsonify({"success": ok})
+
+
+@app.route("/api/training/learn", methods=["POST"])
+def training_learn():
+    """Ejecuta el aprendizaje de reglas de correccion basado en las correcciones del usuario."""
+    result = plate_trainer.learn_corrections()
+    return jsonify(result)
+
+
+@app.route("/api/training/upload", methods=["POST"])
+def training_upload():
+    """Sube una imagen de matricula con su texto correcto para entrenamiento.
+
+    Acepta multipart/form-data con:
+    - image: archivo de imagen (JPG/PNG)
+    - plate_text: texto correcto de la matricula
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "No se envio imagen"}), 400
+
+    file = request.files["image"]
+    plate_text = request.form.get("plate_text", "").strip().upper()
+
+    if not plate_text:
+        return jsonify({"error": "plate_text requerido"}), 400
+
+    # Leer imagen
+    import numpy as np
+    import cv2
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return jsonify({"error": "Imagen no valida"}), 400
+
+    # Guardar para entrenamiento
+    image_id = training_collector.save_plate_image(image, plate_text, 1.0)
+    if image_id:
+        # Marcar como verificada directamente (el usuario ya dio el texto correcto)
+        training_collector.correct_label(image_id, plate_text)
+        return jsonify({"success": True, "image_id": image_id})
+
+    return jsonify({"error": "No se pudo guardar (limite alcanzado?)"}), 500
+
+
+@app.route("/api/training/image/<filename>")
+def training_image(filename):
+    """Sirve una imagen de entrenamiento."""
+    filepath = os.path.join(config.TRAINING_PLATES_DIR, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath)
+    return jsonify({"error": "Imagen no encontrada"}), 404
 
 
 # --- WebSocket: Control de deteccion ---

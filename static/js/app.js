@@ -19,6 +19,7 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
         // Cargar datos al cambiar de seccion
         if (section === 'watchlist') loadWatchlist();
         if (section === 'history') loadHistory();
+        if (section === 'training') loadTraining();
         if (section === 'settings') loadSettings();
     });
 });
@@ -345,6 +346,126 @@ document.getElementById('btn-save-settings').addEventListener('click', () => {
         loadSettings();
     })
     .catch(() => {});
+});
+
+// --- Training ---
+function loadTraining() {
+    // Stats
+    fetch('/api/training/stats')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('training-stats').innerHTML = `
+                <strong>Dataset:</strong> ${data.total_images || 0} imagenes
+                (${data.verified || 0} verificadas, ${data.unverified || 0} pendientes)
+                | <strong>Reglas aprendidas:</strong> ${data.correction_rules || 0}
+                | Max: ${data.max_images || 5000}
+            `;
+        })
+        .catch(() => {});
+
+    // Unverified items
+    fetch('/api/training/unverified')
+        .then(r => r.json())
+        .then(items => {
+            const container = document.getElementById('corrections-list');
+            if (items.length === 0) {
+                container.innerHTML = '<p class="empty-msg">No hay lecturas pendientes de corregir</p>';
+                return;
+            }
+            container.innerHTML = '';
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'correction-item';
+                div.innerHTML = `
+                    <img src="/api/training/image/${item.filename}" alt="Matricula">
+                    <div class="correction-info">
+                        <div>OCR leyo: <span class="correction-ocr">${item.ocr_text || '???'}</span></div>
+                        <div style="color:var(--text-secondary);font-size:0.8em">Confianza: ${(item.confidence * 100).toFixed(0)}%</div>
+                        <div class="correction-input">
+                            <input type="text" id="correct-${item.id}" placeholder="Texto correcto" value="${item.ocr_text || ''}" maxlength="12">
+                            <button class="btn btn-primary" onclick="submitCorrection('${item.id}')">OK</button>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        })
+        .catch(() => {});
+}
+
+function submitCorrection(imageId) {
+    const input = document.getElementById('correct-' + imageId);
+    const text = input.value.trim();
+    if (!text) return;
+
+    fetch('/api/training/correct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: imageId, corrected_text: text })
+    })
+    .then(r => r.json())
+    .then(() => loadTraining())
+    .catch(() => {});
+}
+
+// Upload form
+document.getElementById('upload-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fileInput = document.getElementById('upload-image');
+    const plateText = document.getElementById('upload-plate-text').value.trim();
+    const resultDiv = document.getElementById('upload-result');
+
+    if (!fileInput.files.length || !plateText) {
+        resultDiv.classList.remove('hidden');
+        resultDiv.textContent = 'Selecciona una imagen y escribe el texto de la matricula.';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('image', fileInput.files[0]);
+    formData.append('plate_text', plateText);
+
+    fetch('/api/training/upload', {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+        resultDiv.classList.remove('hidden');
+        if (data.success) {
+            resultDiv.textContent = 'Imagen guardada correctamente para entrenamiento.';
+            fileInput.value = '';
+            document.getElementById('upload-plate-text').value = '';
+            loadTraining();
+        } else {
+            resultDiv.textContent = 'Error: ' + (data.error || 'desconocido');
+        }
+    })
+    .catch(() => {
+        resultDiv.classList.remove('hidden');
+        resultDiv.textContent = 'Error de conexion.';
+    });
+});
+
+// Learn button
+document.getElementById('btn-learn').addEventListener('click', () => {
+    const resultDiv = document.getElementById('learn-result');
+    resultDiv.classList.remove('hidden');
+    resultDiv.textContent = 'Analizando correcciones...';
+
+    fetch('/api/training/learn', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                resultDiv.textContent = `Aprendizaje completado: ${data.rules_count} reglas generadas a partir de ${data.dataset_size} imagenes.`;
+            } else {
+                resultDiv.textContent = 'No hay suficientes datos verificados para aprender. Sube y corrige mas imagenes.';
+            }
+            loadTraining();
+        })
+        .catch(() => {
+            resultDiv.textContent = 'Error al ejecutar aprendizaje.';
+        });
 });
 
 // --- Inicializacion ---

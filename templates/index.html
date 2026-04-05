@@ -14,6 +14,7 @@
             <button class="nav-tab active" data-section="dashboard">Monitor</button>
             <button class="nav-tab" data-section="watchlist">Vigilancia</button>
             <button class="nav-tab" data-section="history">Historial</button>
+            <button class="nav-tab" data-section="training">Entrenar</button>
             <button class="nav-tab" data-section="settings">Ajustes</button>
         </div>
     </nav>
@@ -115,6 +116,40 @@
         <div class="csv-files">
             <h3>Archivos CSV disponibles</h3>
             <div id="csv-files-list"></div>
+        </div>
+    </section>
+
+    <!-- SECCION: Entrenamiento -->
+    <section id="section-training" class="section hidden">
+        <h2>Entrenamiento del OCR</h2>
+
+        <div class="training-stats" id="training-stats">
+            Cargando estadisticas...
+        </div>
+
+        <!-- Subir imagen manualmente -->
+        <div class="training-upload">
+            <h3>Subir foto de matricula</h3>
+            <p class="help-text">Sube una foto donde se vea la matricula y escribe el texto correcto.</p>
+            <form id="upload-form" enctype="multipart/form-data">
+                <input type="file" id="upload-image" accept="image/*" capture="environment">
+                <input type="text" id="upload-plate-text" placeholder="Texto correcto (ej: 1234 BCD)" maxlength="12">
+                <button type="submit" class="btn btn-primary">Subir</button>
+            </form>
+            <div id="upload-result" class="hidden"></div>
+        </div>
+
+        <!-- Corregir lecturas -->
+        <div class="training-corrections">
+            <h3>Corregir lecturas del OCR</h3>
+            <p class="help-text">Revisa estas matriculas detectadas y corrige los errores de lectura.</p>
+            <div id="corrections-list"></div>
+        </div>
+
+        <!-- Aprender -->
+        <div class="training-learn">
+            <button id="btn-learn" class="btn btn-primary">Aprender de correcciones</button>
+            <div id="learn-result" class="hidden"></div>
         </div>
     </section>
 
