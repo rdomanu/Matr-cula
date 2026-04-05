@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>MatriScan - Preview de la Interfaz</title>
+    <style>
+:root {
+    --bg-primary: #1a1a2e;
+    --bg-secondary: #16213e;
+    --bg-card: #0f3460;
+    --accent: #e94560;
+    --accent-green: #00c853;
+    --text-primary: #ffffff;
+    --text-secondary: #a0a0b0;
+    --border: #2a2a4a;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+.navbar {
+    background: var(--bg-secondary);
+    padding: 10px 15px;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    border-bottom: 2px solid var(--accent);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+.nav-brand { font-size: 1.3em; font-weight: bold; color: var(--accent); white-space: nowrap; }
+.nav-tabs { display: flex; gap: 5px; overflow-x: auto; }
+.nav-tab {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85em;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+.nav-tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+.alert-banner {
+    position: fixed; top: 0; left: 0; right: 0;
+    background: var(--accent); color: white; padding: 15px; z-index: 200;
+    animation: alertPulse 0.5s ease-in-out infinite alternate;
+}
+.alert-banner.hidden { display: none; }
+@keyframes alertPulse { from { opacity: 0.8; } to { opacity: 1; transform: scale(1.01); } }
+.alert-content { display: flex; align-items: center; gap: 15px; max-width: 600px; margin: 0 auto; }
+.alert-icon { font-size: 2em; font-weight: bold; }
+.alert-text { flex: 1; }
+.alert-text strong { font-size: 1.4em; display: block; }
+.btn-dismiss { background: rgba(255,255,255,0.3); border: none; color: white; width: 30px; height: 30px; border-radius: 50%; cursor: pointer; font-weight: bold; }
+.section { padding: 15px; max-width: 800px; margin: 0 auto; }
+.section.hidden { display: none; }
+.controls { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 1em; font-weight: bold; cursor: pointer; transition: transform 0.1s; }
+.btn:active { transform: scale(0.95); }
+.btn-start { background: var(--accent-green); color: white; font-size: 1.2em; }
+.btn-stop { background: var(--accent); color: white; font-size: 1.2em; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); cursor: pointer; padding: 10px 20px; border-radius: 8px; font-size: 1em; }
+.hidden-el { display: none !important; }
+.stats { color: var(--text-secondary); font-size: 0.85em; }
+.video-container { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16/9; margin-bottom: 15px; }
+.video-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 1.1em; flex-direction: column; gap: 10px; }
+.video-placeholder svg { opacity: 0.3; }
+.recent-plates h3 { margin-bottom: 8px; font-size: 1em; color: var(--text-secondary); }
+.plates-list { max-height: 300px; overflow-y: auto; }
+.plate-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px; margin-bottom: 4px; border-left: 3px solid var(--accent-green); }
+.plate-item.is-alert { border-left-color: var(--accent); background: rgba(233, 69, 96, 0.15); }
+.plate-text { font-family: 'Courier New', monospace; font-size: 1.1em; font-weight: bold; letter-spacing: 2px; }
+.plate-time { color: var(--text-secondary); font-size: 0.8em; }
+.empty-msg { color: var(--text-secondary); text-align: center; padding: 20px; }
+.watchlist-add { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; }
+.watchlist-add input { flex: 1; min-width: 120px; }
+input[type="text"], input[type="number"], select { background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 1em; }
+.watchlist-items { margin-bottom: 15px; }
+.wl-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-secondary); border-radius: 6px; margin-bottom: 4px; }
+.wl-item-info { flex: 1; }
+.wl-item-plate { font-family: 'Courier New', monospace; font-size: 1.1em; font-weight: bold; letter-spacing: 2px; }
+.wl-item-alias { color: var(--text-secondary); font-size: 0.85em; }
+.btn-remove { background: var(--accent); color: white; border: none; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-weight: bold; }
+.watchlist-actions { display: flex; gap: 10px; }
+.history-result { background: var(--bg-card); padding: 12px; border-radius: 8px; margin-bottom: 15px; border-left: 3px solid #ffc107; }
+.history-result h4 { margin-bottom: 8px; color: #ffc107; }
+.history-search { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; }
+.history-search input { flex: 1; min-width: 150px; }
+.history-table-container { overflow-x: auto; margin-bottom: 15px; }
+.history-table { width: 100%; border-collapse: collapse; }
+.history-table th, .history-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85em; }
+.history-table th { background: var(--bg-secondary); color: var(--text-secondary); position: sticky; top: 0; }
+.history-table td { font-family: 'Courier New', monospace; }
+.csv-files h3 { margin-bottom: 8px; color: var(--text-secondary); font-size: 1em; }
+.csv-file-item { display: flex; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border-radius: 4px; margin-bottom: 3px; font-size: 0.85em; }
+.settings-group { margin-bottom: 20px; }
+.settings-group label { display: block; margin-bottom: 5px; color: var(--text-secondary); }
+.settings-group select, .settings-group input[type="number"] { width: 100%; }
+input[type="range"] { width: calc(100% - 40px); vertical-align: middle; }
+.settings-info { margin-top: 30px; padding: 15px; background: var(--bg-secondary); border-radius: 8px; }
+.settings-info h3 { margin-bottom: 10px; color: var(--text-secondary); }
+.training-stats { background: var(--bg-secondary); padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; }
+.training-upload, .training-corrections, .training-learn { margin-bottom: 20px; }
+.training-upload h3, .training-corrections h3 { margin-bottom: 5px; }
+.help-text { color: var(--text-secondary); font-size: 0.85em; margin-bottom: 10px; }
+#upload-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#upload-form input[type="file"] { color: var(--text-primary); font-size: 0.9em; }
+#upload-result, #learn-result { margin-top: 10px; padding: 8px 12px; border-radius: 6px; background: var(--bg-card); }
+.correction-item { display: flex; gap: 10px; align-items: center; padding: 10px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.correction-item .plate-preview { width: 200px; height: 55px; border-radius: 4px; border: 1px solid var(--border); background: white; display: flex; align-items: center; justify-content: center; color: #222; font-family: 'Courier New', monospace; font-size: 1.2em; font-weight: bold; letter-spacing: 3px; }
+.correction-info { flex: 1; min-width: 150px; }
+.correction-ocr { font-family: 'Courier New', monospace; font-size: 1.1em; color: var(--accent); }
+.correction-input { display: flex; gap: 5px; margin-top: 5px; }
+.correction-input input { width: 130px; font-family: 'Courier New', monospace; text-transform: uppercase; }
+.training-filters { display: flex; gap: 5px; margin-bottom: 12px; flex-wrap: wrap; }
+.btn-filter { background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-secondary); padding: 4px 10px; border-radius: 15px; cursor: pointer; font-size: 0.8em; }
+.btn-filter.active { background: var(--accent); color: white; border-color: var(--accent); }
+.reason-badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 0.7em; font-weight: bold; text-transform: uppercase; }
+.reason-ocr_failed { background: #e53935; color: white; }
+.reason-invalid_format { background: #ff9800; color: white; }
+.reason-low_confidence { background: #ffc107; color: #333; }
+.reason-random_sample { background: #4caf50; color: white; }
+.reason-manual { background: #2196f3; color: white; }
+.btn-discard { background: transparent; border: 1px solid var(--accent); color: var(--accent); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+.demo-banner { background: linear-gradient(135deg, var(--bg-card), var(--bg-secondary)); padding: 8px 15px; text-align: center; font-size: 0.8em; color: var(--accent); border-bottom: 1px solid var(--border); }
+@media (max-width: 480px) {
+    .navbar { flex-direction: column; gap: 8px; }
+    .nav-tabs { width: 100%; justify-content: space-around; }
+    .nav-tab { padding: 5px 8px; font-size: 0.8em; }
+    .controls { justify-content: center; }
+}
+    </style>
+</head>
+<body>
+    <div class="demo-banner">PREVIEW - Interfaz de demostracion con datos de ejemplo</div>
+
+    <nav class="navbar">
+        <div class="nav-brand">MatriScan</div>
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-section="dashboard">Monitor</button>
+            <button class="nav-tab" data-section="watchlist">Vigilancia</button>
+            <button class="nav-tab" data-section="history">Historial</button>
+            <button class="nav-tab" data-section="training">Entrenar</button>
+            <button class="nav-tab" data-section="settings">Ajustes</button>
+        </div>
+    </nav>
+
+    <!-- Alerta emergente (visible en demo) -->
+    <div id="alert-banner" class="alert-banner hidden">
+        <div class="alert-content">
+            <span class="alert-icon">!!</span>
+            <div class="alert-text">
+                <strong id="alert-plate">4820 GNT</strong>
+                <span id="alert-alias"> - Coche de Carlos</span>
+            </div>
+            <button id="alert-dismiss" class="btn-dismiss" onclick="document.getElementById('alert-banner').classList.add('hidden')">X</button>
+        </div>
+    </div>
+
+    <!-- SECCION: Dashboard -->
+    <section id="section-dashboard" class="section">
+        <div class="controls">
+            <button class="btn btn-stop" onclick="document.getElementById('alert-banner').classList.toggle('hidden')">DEMO ALERTA</button>
+            <div class="stats">
+                <span>47</span> matriculas |
+                <span>9.2</span> FPS |
+                GPS: <span>OK</span>
+            </div>
+        </div>
+
+        <div class="video-container">
+            <div class="video-placeholder">
+                <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                </svg>
+                Aqui se mostraria el video en vivo de la camara
+            </div>
+        </div>
+
+        <div class="recent-plates">
+            <h3>Ultimas matriculas detectadas</h3>
+            <div class="plates-list">
+                <div class="plate-item is-alert">
+                    <span class="plate-text">4820 GNT</span>
+                    <span class="plate-time">14:32:05 - Coche de Carlos</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">7234 BKM</span>
+                    <span class="plate-time">14:31:58</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">0091 HLC</span>
+                    <span class="plate-time">14:31:42</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">M 4521 BT</span>
+                    <span class="plate-time">14:31:30</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">5567 FGR</span>
+                    <span class="plate-time">14:31:15</span>
+                </div>
+                <div class="plate-item is-alert">
+                    <span class="plate-text">1234 BCD</span>
+                    <span class="plate-time">14:30:52 - Furgoneta trabajo</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">8901 KLN</span>
+                    <span class="plate-time">14:30:33</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">3456 DPW</span>
+                    <span class="plate-time">14:30:10</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">B 6789 CK</span>
+                    <span class="plate-time">14:29:55</span>
+                </div>
+                <div class="plate-item">
+                    <span class="plate-text">6712 JVR</span>
+                    <span class="plate-time">14:29:40</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- SECCION: Watchlist -->
+    <section id="section-watchlist" class="section hidden">
+        <h2>Lista de Vigilancia</h2>
+
+        <div class="watchlist-add">
+            <input type="text" placeholder="Matricula (ej: 1234 BCD)" maxlength="12">
+            <input type="text" placeholder="Alias (ej: Coche de Juan)">
+            <button class="btn btn-primary">Anadir</button>
+        </div>
+
+        <div class="history-result">
+            <h4>Historial de esta matricula:</h4>
+            <div>
+                <div>2026-04-03 09:15:22 - GPS: 40.416775, -3.703790</div>
+                <div>2026-04-01 18:42:05 - GPS: 40.453054, -3.688344</div>
+            </div>
+        </div>
+
+        <div class="watchlist-items">
+            <div class="wl-item">
+                <div class="wl-item-info">
+                    <div class="wl-item-plate">4820 GNT</div>
+                    <div class="wl-item-alias">Coche de Carlos</div>
+                </div>
+                <button class="btn-remove">X</button>
+            </div>
+            <div class="wl-item">
+                <div class="wl-item-info">
+                    <div class="wl-item-plate">1234 BCD</div>
+                    <div class="wl-item-alias">Furgoneta trabajo</div>
+                </div>
+                <button class="btn-remove">X</button>
+            </div>
+            <div class="wl-item">
+                <div class="wl-item-info">
+                    <div class="wl-item-plate">9087 MNP</div>
+                    <div class="wl-item-alias">Moto de Ana</div>
+                </div>
+                <button class="btn-remove">X</button>
+            </div>
+            <div class="wl-item">
+                <div class="wl-item-info">
+                    <div class="wl-item-plate">M 2345 JK</div>
+                    <div class="wl-item-alias">Coche antiguo papa</div>
+                </div>
+                <button class="btn-remove">X</button>
+            </div>
+        </div>
+
+        <div class="watchlist-actions">
+            <button class="btn btn-secondary">Exportar JSON</button>
+            <label class="btn btn-secondary">Importar JSON</label>
+        </div>
+    </section>
+
+    <!-- SECCION: Historial -->
+    <section id="section-history" class="section hidden">
+        <h2>Historial de Detecciones</h2>
+
+        <div class="history-search">
+            <input type="text" placeholder="Buscar matricula...">
+            <button class="btn btn-primary">Buscar</button>
+            <button class="btn btn-secondary">Exportar CSV</button>
+        </div>
+
+        <div class="history-table-container">
+            <table class="history-table">
+                <thead>
+                    <tr><th>Fecha</th><th>Hora</th><th>Matricula</th><th>Tipo</th><th>Ubicacion</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>2026-04-05</td><td>14:32:05</td><td>4820 GNT</td><td>modern</td><td>40.4168, -3.7038</td></tr>
+                    <tr><td>2026-04-05</td><td>14:31:58</td><td>7234 BKM</td><td>modern</td><td>40.4168, -3.7038</td></tr>
+                    <tr><td>2026-04-05</td><td>14:31:42</td><td>0091 HLC</td><td>modern</td><td>40.4167, -3.7036</td></tr>
+                    <tr><td>2026-04-05</td><td>14:31:30</td><td>M 4521 BT</td><td>old_alpha</td><td>40.4166, -3.7035</td></tr>
+                    <tr><td>2026-04-05</td><td>14:31:15</td><td>5567 FGR</td><td>modern</td><td>40.4165, -3.7034</td></tr>
+                    <tr><td>2026-04-05</td><td>14:30:52</td><td>1234 BCD</td><td>modern</td><td>40.4164, -3.7032</td></tr>
+                    <tr><td>2026-04-05</td><td>14:30:33</td><td>8901 KLN</td><td>modern</td><td>40.4163, -3.7030</td></tr>
+                    <tr><td>2026-04-05</td><td>14:30:10</td><td>3456 DPW</td><td>modern</td><td>40.4161, -3.7028</td></tr>
+                    <tr><td>2026-04-05</td><td>14:29:55</td><td>B 6789 CK</td><td>old_alpha</td><td>40.4160, -3.7026</td></tr>
+                    <tr><td>2026-04-05</td><td>14:29:40</td><td>6712 JVR</td><td>modern</td><td>40.4158, -3.7024</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="csv-files">
+            <h3>Archivos CSV disponibles</h3>
+            <div>
+                <div class="csv-file-item"><span>detections_2026-04-05.csv</span><span>12.3 KB</span></div>
+                <div class="csv-file-item"><span>detections_2026-04-04.csv</span><span>45.7 KB</span></div>
+                <div class="csv-file-item"><span>detections_2026-04-03.csv</span><span>38.2 KB</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- SECCION: Entrenamiento -->
+    <section id="section-training" class="section hidden">
+        <h2>Entrenamiento del OCR</h2>
+
+        <div class="training-stats">
+            <strong>Dataset:</strong> 127 imagenes (89 verificadas, 38 pendientes)<br>
+            <strong>Reglas aprendidas:</strong> 5 | Max: 5000<br>
+            <span style="font-size:0.85em;color:var(--text-secondary)">OCR fallo: 12, Formato invalido: 8, Baja confianza: 11, Muestreo aleatorio: 7</span>
+        </div>
+
+        <div class="training-upload">
+            <h3>Subir foto de matricula</h3>
+            <p class="help-text">Sube una foto donde se vea la matricula y escribe el texto correcto.</p>
+            <form id="upload-form" onsubmit="return false">
+                <input type="file" accept="image/*">
+                <input type="text" placeholder="Texto correcto (ej: 1234 BCD)" maxlength="12">
+                <button class="btn btn-primary">Subir</button>
+            </form>
+        </div>
+
+        <div class="training-corrections">
+            <h3>Corregir lecturas del OCR</h3>
+            <p class="help-text">Revisa estas imagenes capturadas automaticamente. Escribe el texto correcto o descarta las que no sean matriculas.</p>
+            <div class="training-filters">
+                <button class="btn-filter active" data-filter="">Todos</button>
+                <button class="btn-filter" data-filter="ocr_failed">OCR fallo</button>
+                <button class="btn-filter" data-filter="invalid_format">Formato invalido</button>
+                <button class="btn-filter" data-filter="low_confidence">Baja confianza</button>
+                <button class="btn-filter" data-filter="random_sample">Muestreo</button>
+            </div>
+            <div>
+                <div class="correction-item">
+                    <div class="plate-preview" style="background:white;border-left:4px solid #003DA5">
+                        <span style="color:#003DA5;font-size:0.6em;margin-right:8px">E</span>
+                        48Z0 GNT
+                    </div>
+                    <div class="correction-info">
+                        <div>
+                            <span class="reason-badge reason-low_confidence">Baja confianza</span>
+                            OCR: <span class="correction-ocr">48Z0 GNT</span>
+                            <span style="color:var(--text-secondary);font-size:0.8em">(52%)</span>
+                        </div>
+                        <div class="correction-input">
+                            <input type="text" placeholder="Matricula correcta" value="4820 GNT" maxlength="12">
+                            <button class="btn btn-primary">OK</button>
+                            <button class="btn-discard">Descartar</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="correction-item">
+                    <div class="plate-preview" style="background:white;border-left:4px solid #003DA5">
+                        <span style="color:#003DA5;font-size:0.6em;margin-right:8px">E</span>
+                        ????
+                    </div>
+                    <div class="correction-info">
+                        <div>
+                            <span class="reason-badge reason-ocr_failed">OCR FALLO</span>
+                            OCR: <span class="correction-ocr">???</span>
+                            <span style="color:var(--text-secondary);font-size:0.8em">(0%)</span>
+                        </div>
+                        <div class="correction-input">
+                            <input type="text" placeholder="Matricula correcta" value="" maxlength="12">
+                            <button class="btn btn-primary">OK</button>
+                            <button class="btn-discard">Descartar</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="correction-item">
+                    <div class="plate-preview" style="background:white;border-left:4px solid #003DA5">
+                        <span style="color:#003DA5;font-size:0.6em;margin-right:8px">E</span>
+                        72B4 BKM
+                    </div>
+                    <div class="correction-info">
+                        <div>
+                            <span class="reason-badge reason-invalid_format">Formato invalido</span>
+                            OCR: <span class="correction-ocr">72B4 BKM</span>
+                            <span style="color:var(--text-secondary);font-size:0.8em">(78%)</span>
+                        </div>
+                        <div class="correction-input">
+                            <input type="text" placeholder="Matricula correcta" value="7234 BKM" maxlength="12">
+                            <button class="btn btn-primary">OK</button>
+                            <button class="btn-discard">Descartar</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="correction-item">
+                    <div class="plate-preview" style="background:white;border-left:4px solid #003DA5">
+                        <span style="color:#003DA5;font-size:0.6em;margin-right:8px">E</span>
+                        5567 FGR
+                    </div>
+                    <div class="correction-info">
+                        <div>
+                            <span class="reason-badge reason-random_sample">Muestreo aleatorio</span>
+                            OCR: <span class="correction-ocr">5567 FGR</span>
+                            <span style="color:var(--text-secondary);font-size:0.8em">(94%)</span>
+                        </div>
+                        <div class="correction-input">
+                            <input type="text" placeholder="Matricula correcta" value="5567 FGR" maxlength="12">
+                            <button class="btn btn-primary">OK</button>
+                            <button class="btn-discard">Descartar</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="training-learn">
+            <button class="btn btn-primary">Aprender de correcciones</button>
+        </div>
+    </section>
+
+    <!-- SECCION: Ajustes -->
+    <section id="section-settings" class="section hidden">
+        <h2>Configuracion</h2>
+        <div class="settings-group">
+            <label>Fuente de camara</label>
+            <select><option>Camara local (0)</option><option>Camara secundaria (1)</option><option>Camara IP (URL)</option></select>
+        </div>
+        <div class="settings-group">
+            <label>FPS de captura</label>
+            <input type="range" min="3" max="15" value="10">
+            <span>10</span>
+        </div>
+        <div class="settings-group">
+            <label>Cooldown de alertas (segundos)</label>
+            <input type="number" min="30" max="3600" value="300" style="width:100%">
+        </div>
+        <div class="settings-group">
+            <label><input type="checkbox" checked> Registrar todas las matriculas en CSV</label>
+        </div>
+        <div class="settings-group">
+            <label><input type="checkbox" checked> Sonido de alerta activo</label>
+        </div>
+        <div class="settings-group">
+            <label><input type="checkbox" checked> Captura automatica de frames dificiles</label>
+        </div>
+        <button class="btn btn-primary">Guardar Ajustes</button>
+        <div class="settings-info">
+            <h3>Estado del sistema</h3>
+            <div>
+                <div>Estado: Activo</div>
+                <div>Matriculas sesion: 47</div>
+                <div>FPS real: 9.2</div>
+                <div>GPS: OK (40.4168, -3.7038)</div>
+                <div>Dataset entrenamiento: 127 imagenes</div>
+            </div>
+        </div>
+    </section>
+
+    <script>
+    // Navegacion SPA demo
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.section').forEach(s => s.classList.add('hidden'));
+            tab.classList.add('active');
+            document.getElementById('section-' + tab.dataset.section).classList.remove('hidden');
+        });
+    });
+    // Filter buttons demo
+    document.querySelectorAll('.btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+    });
+    </script>
+</body>
+</html>
