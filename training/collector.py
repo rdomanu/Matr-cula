@@ -7,7 +7,8 @@ import time
 import uuid
 from datetime import datetime
 
-import cv2
+import numpy as np
+from PIL import Image
 
 import config
 
@@ -84,7 +85,11 @@ class TrainingCollector:
         filepath = os.path.join(self.plates_dir, filename)
 
         try:
-            cv2.imwrite(filepath, image)
+            if isinstance(image, np.ndarray):
+                pil_img = Image.fromarray(image)
+            else:
+                pil_img = image
+            pil_img.save(filepath, "JPEG")
         except Exception:
             return None
 

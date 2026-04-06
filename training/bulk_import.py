@@ -30,7 +30,8 @@ import sys
 # Anadir directorio raiz al path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import cv2
+import numpy as np
+from PIL import Image
 
 import config
 from core.plate_validator import validate_plate, normalize_plate
@@ -78,7 +79,7 @@ def auto_detect_plate(image_path):
     from core.preprocessor import preprocess_for_easyocr
     from core.ocr_engine import read_plate
 
-    image = cv2.imread(image_path)
+    image = np.array(Image.open(image_path).convert("RGB"))
     if image is None:
         return None, None, 0
 
@@ -165,7 +166,10 @@ def import_from_folder(folder, auto_detect=False, labels_file=None):
             continue
 
         # Leer imagen
-        image = cv2.imread(filepath)
+        try:
+            image = np.array(Image.open(filepath).convert("RGB"))
+        except Exception:
+            image = None
         if image is None:
             stats["failed"] += 1
             print(f"  [{i}/{len(image_files)}] {filename} -> Error leyendo imagen")

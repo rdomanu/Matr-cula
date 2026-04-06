@@ -5,6 +5,8 @@ import time
 import threading
 from datetime import datetime
 
+import numpy as np
+from PIL import Image
 from flask import Flask, render_template, Response, jsonify, request, send_file
 from flask_socketio import SocketIO
 
@@ -185,9 +187,11 @@ def generate_video_feed():
             time.sleep(0.05)
             continue
 
-        import cv2
-        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        frame_bytes = buffer.tobytes()
+        from io import BytesIO
+        pil_img = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame
+        buf = BytesIO()
+        pil_img.save(buf, format="JPEG", quality=60)
+        frame_bytes = buf.getvalue()
 
         yield (
             b"--frame\r\n"
@@ -386,10 +390,11 @@ def training_upload():
         return jsonify({"error": "plate_text requerido"}), 400
 
     # Leer imagen
-    import numpy as np
-    import cv2
-    file_bytes = np.frombuffer(file.read(), np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    try:
+        image = Image.open(file.stream).convert("RGB")
+        image = np.array(image)
+    except Exception:
+        image = None
 
     if image is None:
         return jsonify({"error": "Imagen no valida"}), 400
@@ -432,26 +437,21 @@ def handle_start():
     if detection_running:
         return
 
-    try:
-        source = current_settings["camera_source"]
-        if isinstance(source, str) and source.isdigit():
-            source = int(source)
-        camera.source = source
-        camera.target_fps = current_settings["fps"]
-        camera.start()
-    except RuntimeError as e:
-        socketio.emit("error", {"message": str(e)})
-        return
-
-    # Iniciar GPS
+    camera.start()
     gps_tracker.start()
 
-    # Iniciar deteccion
     detection_running = True
     detection_thread = threading.Thread(target=detection_loop, daemon=True)
     detection_thread.start()
 
     socketio.emit("detection_started")
+
+
+@socketio.on("camera_frame")
+def handle_frame(data):
+    """Recibe un frame de la camara del navegador (base64 JPEG)."""
+    if detection_running and data:
+        camera.receive_frame(data)
 
 
 @socketio.on("stop_detection")

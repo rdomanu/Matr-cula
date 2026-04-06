@@ -6,6 +6,8 @@
 const socket = io();
 let isRunning = false;
 let soundEnabled = true;
+let cameraStream = null;
+let captureInterval = null;
 
 // --- Navegacion SPA ---
 document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -24,29 +26,65 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
     });
 });
 
-// --- Dashboard: Start/Stop ---
-document.getElementById('btn-start').addEventListener('click', () => {
-    socket.emit('start_detection');
+// --- Dashboard: Start/Stop con camara del navegador ---
+document.getElementById('btn-start').addEventListener('click', async () => {
+    try {
+        // Pedir acceso a la camara trasera del movil
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
+        });
+        const video = document.getElementById('camera-video');
+        video.srcObject = cameraStream;
+        video.style.display = 'block';
+        document.getElementById('video-placeholder').style.display = 'none';
+
+        // Avisar al servidor que empiece a procesar
+        socket.emit('start_detection');
+
+        // Enviar frames al servidor cada 100ms (~10 FPS)
+        const canvas = document.getElementById('camera-canvas');
+        captureInterval = setInterval(() => {
+            if (!isRunning) return;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            if (canvas.width === 0) return;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            socket.emit('camera_frame', dataUrl);
+        }, 100);
+
+    } catch (err) {
+        alert('No se puede acceder a la camara: ' + err.message);
+    }
 });
 
 document.getElementById('btn-stop').addEventListener('click', () => {
     socket.emit('stop_detection');
+    stopCamera();
 });
+
+function stopCamera() {
+    if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
+    if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+    const video = document.getElementById('camera-video');
+    video.style.display = 'none';
+    video.srcObject = null;
+}
 
 socket.on('detection_started', () => {
     isRunning = true;
     document.getElementById('btn-start').classList.add('hidden');
     document.getElementById('btn-stop').classList.remove('hidden');
-    document.getElementById('video-placeholder').classList.add('hidden');
-    document.getElementById('video-feed').src = '/api/video_feed?' + Date.now();
 });
 
 socket.on('detection_stopped', () => {
     isRunning = false;
+    stopCamera();
     document.getElementById('btn-stop').classList.add('hidden');
     document.getElementById('btn-start').classList.remove('hidden');
-    document.getElementById('video-feed').src = '';
-    document.getElementById('video-placeholder').classList.remove('hidden');
+    document.getElementById('video-placeholder').style.display = 'flex';
 });
 
 // --- Actualizaciones en tiempo real ---

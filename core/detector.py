@@ -1,179 +1,102 @@
-"""Deteccion de multiples regiones de matricula en un frame."""
+"""Deteccion de regiones de matricula en un frame (sin OpenCV, solo Pillow+numpy)."""
 
-import cv2
 import numpy as np
+from PIL import Image, ImageDraw
 
 import config
 
 
-def _non_max_suppression(boxes, overlap_threshold=0.3):
-    """Elimina detecciones solapadas manteniendo la mejor de cada grupo."""
-    if len(boxes) == 0:
+def _find_plate_regions(np_image):
+    """Detecta regiones rectangulares que podrian ser matriculas.
+
+    Usa analisis de bordes simplificado con numpy.
+    Las matriculas espanolas son rectangulos blancos con ratio ~4.7:1.
+    """
+    if np_image is None or np_image.size == 0:
         return []
 
-    boxes_array = np.array(boxes)
-    x1 = boxes_array[:, 0]
-    y1 = boxes_array[:, 1]
-    x2 = boxes_array[:, 0] + boxes_array[:, 2]
-    y2 = boxes_array[:, 1] + boxes_array[:, 3]
-    areas = boxes_array[:, 2] * boxes_array[:, 3]
+    h, w = np_image.shape[:2]
 
-    # Ordenar por area (las mas grandes primero, suelen ser mejores candidatas)
-    order = areas.argsort()[::-1]
-    keep = []
+    # Convertir a escala de grises si es color
+    if len(np_image.shape) == 3:
+        gray = np.mean(np_image, axis=2).astype(np.uint8)
+    else:
+        gray = np_image
 
-    while len(order) > 0:
-        i = order[0]
-        keep.append(i)
+    # Buscar regiones blancas/claras (fondo de matricula)
+    # Las matriculas espanolas tienen fondo blanco (valor alto)
+    white_mask = gray > 180
 
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-
-        w = np.maximum(0, xx2 - xx1)
-        h = np.maximum(0, yy2 - yy1)
-        overlap = (w * h) / areas[order[1:]]
-
-        remaining = np.where(overlap <= overlap_threshold)[0]
-        order = order[remaining + 1]
-
-    return [boxes[i] for i in keep]
-
-
-def detect_plates_contour(frame):
-    """Detecta regiones de matricula usando deteccion de contornos.
-
-    Args:
-        frame: Imagen BGR del frame completo.
-
-    Returns:
-        Lista de tuplas (x, y, w, h) con las regiones de matriculas detectadas.
-    """
-    # Convertir a escala de grises
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Filtro bilateral: reduce ruido preservando bordes
-    filtered = cv2.bilateralFilter(gray, 11, 17, 17)
-
-    # Deteccion de bordes Canny
-    edges = cv2.Canny(filtered, 30, 200)
-
-    # Dilatar para conectar bordes cercanos
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    dilated = cv2.dilate(edges, kernel, iterations=1)
-
-    # Encontrar contornos
-    contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
+    # Buscar filas con suficientes pixeles blancos consecutivos
     candidates = []
-    for contour in contours:
-        # Aproximar el contorno a un poligono
-        perimeter = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
 
-        # Las matriculas son rectangulares (4 vertices)
-        if len(approx) >= 4 and len(approx) <= 8:
-            x, y, w, h = cv2.boundingRect(approx)
+    # Escanear en bloques para encontrar regiones claras rectangulares
+    step_y = max(2, h // 80)
+    step_x = max(2, w // 80)
 
-            # Filtrar por tamano
-            if w < config.PLATE_MIN_WIDTH or w > config.PLATE_MAX_WIDTH:
-                continue
-            if h < config.PLATE_MIN_HEIGHT or h > config.PLATE_MAX_HEIGHT:
-                continue
+    for y in range(0, h - config.PLATE_MIN_HEIGHT, step_y):
+        for x in range(0, w - config.PLATE_MIN_WIDTH, step_x):
+            # Probar varios tamanos de ventana
+            for pw in range(config.PLATE_MIN_WIDTH, min(config.PLATE_MAX_WIDTH, w - x), 40):
+                ph = int(pw / 4.7)  # Ratio de matricula espanola
+                if ph < config.PLATE_MIN_HEIGHT or y + ph > h:
+                    continue
+                if ph > config.PLATE_MAX_HEIGHT:
+                    break
 
-            # Filtrar por ratio de aspecto
-            aspect_ratio = w / h
-            if aspect_ratio < config.PLATE_ASPECT_RATIO_MIN:
-                continue
-            if aspect_ratio > config.PLATE_ASPECT_RATIO_MAX:
-                continue
+                # Comprobar si la region es mayoritariamente blanca
+                region = white_mask[y:y + ph, x:x + pw]
+                white_ratio = np.mean(region)
 
-            # Verificar que la region tiene suficiente contraste (caracteres)
-            roi = gray[y:y + h, x:x + w]
-            if roi.size > 0:
-                std_dev = np.std(roi)
-                if std_dev > 30:  # Suficiente variacion = posibles caracteres
-                    candidates.append((x, y, w, h))
+                if 0.4 <= white_ratio <= 0.85:
+                    # Comprobar que hay variacion (caracteres oscuros sobre fondo claro)
+                    region_gray = gray[y:y + ph, x:x + pw]
+                    std = np.std(region_gray)
+                    if std > 35:
+                        candidates.append((x, y, pw, ph, std))
 
-    # Eliminar detecciones solapadas
-    return _non_max_suppression(candidates)
+    # Eliminar duplicados solapados (NMS simple)
+    candidates.sort(key=lambda c: c[4], reverse=True)  # Ordenar por contraste
+    filtered = []
+    for cand in candidates:
+        x, y, pw, ph, _ = cand
+        overlap = False
+        for fx, fy, fpw, fph in filtered:
+            # Comprobar solapamiento
+            ox = max(0, min(x + pw, fx + fpw) - max(x, fx))
+            oy = max(0, min(y + ph, fy + fph) - max(y, fy))
+            overlap_area = ox * oy
+            cand_area = pw * ph
+            if overlap_area > 0.3 * cand_area:
+                overlap = True
+                break
+        if not overlap:
+            filtered.append((x, y, pw, ph))
+            if len(filtered) >= 10:  # Maximo 10 candidatos
+                break
 
-
-def detect_plates_color(frame):
-    """Detecta matriculas por color (fondo blanco con borde/banda azul EU).
-
-    Complementa la deteccion por contornos.
-    """
-    # Convertir a HSV para deteccion de color
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    # Rango para blanco (fondo de matricula)
-    lower_white = np.array([0, 0, 180])
-    upper_white = np.array([180, 50, 255])
-    white_mask = cv2.inRange(hsv, lower_white, upper_white)
-
-    # Operaciones morfologicas para limpiar mascara
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5))
-    closed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
-
-    # Encontrar contornos en la mascara
-    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    candidates = []
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-
-        if w < config.PLATE_MIN_WIDTH or w > config.PLATE_MAX_WIDTH:
-            continue
-        if h < config.PLATE_MIN_HEIGHT or h > config.PLATE_MAX_HEIGHT:
-            continue
-
-        aspect_ratio = w / h
-        if aspect_ratio < config.PLATE_ASPECT_RATIO_MIN:
-            continue
-        if aspect_ratio > config.PLATE_ASPECT_RATIO_MAX:
-            continue
-
-        # Verificar que el porcentaje de blancos es razonable (40-90%)
-        roi_mask = white_mask[y:y + h, x:x + w]
-        if roi_mask.size > 0:
-            white_ratio = np.count_nonzero(roi_mask) / roi_mask.size
-            if 0.3 <= white_ratio <= 0.9:
-                candidates.append((x, y, w, h))
-
-    return _non_max_suppression(candidates)
+    return filtered
 
 
 def detect_all_plates(frame):
-    """Detecta todas las matriculas en un frame combinando ambos metodos.
+    """Detecta todas las matriculas en un frame.
 
     Args:
-        frame: Imagen BGR del frame completo de la camara.
+        frame: numpy array RGB del frame de la camara.
 
     Returns:
-        Lista de tuplas (x, y, w, h) de todas las matriculas detectadas.
-        Lista de imagenes recortadas de cada matricula.
+        Lista de tuplas (x, y, w, h) de las regiones detectadas.
+        Lista de numpy arrays recortados de cada region.
     """
     if frame is None or frame.size == 0:
         return [], []
 
-    # Combinar ambos metodos de deteccion
-    contour_plates = detect_plates_contour(frame)
-    color_plates = detect_plates_color(frame)
+    regions = _find_plate_regions(frame)
 
-    # Unir todas las detecciones
-    all_candidates = contour_plates + color_plates
-
-    # NMS final para eliminar duplicados entre ambos metodos
-    final_plates = _non_max_suppression(all_candidates, overlap_threshold=0.3)
-
-    # Recortar imagenes de matricula
     plate_images = []
     valid_boxes = []
-    for (x, y, w, h) in final_plates:
-        # Margen extra del 5% para capturar bordes completos
+    for (x, y, w, h) in regions:
+        # Margen extra del 5%
         margin_x = int(w * 0.05)
         margin_y = int(h * 0.05)
         y1 = max(0, y - margin_y)
@@ -190,44 +113,29 @@ def detect_all_plates(frame):
 
 
 def draw_detections(frame, boxes, texts=None, alert_plates=None):
-    """Dibuja rectangulos y texto sobre las matriculas detectadas en el frame.
-
-    Args:
-        frame: Imagen BGR original.
-        boxes: Lista de (x, y, w, h).
-        texts: Lista de textos reconocidos (opcional).
-        alert_plates: Set de matriculas normalizadas que son alertas.
+    """Dibuja rectangulos sobre las matriculas detectadas.
 
     Returns:
-        Frame con anotaciones dibujadas.
+        numpy array RGB con anotaciones.
     """
-    annotated = frame.copy()
+    if frame is None:
+        return frame
+
+    pil_image = Image.fromarray(frame)
+    draw = ImageDraw.Draw(pil_image)
     alert_plates = alert_plates or set()
 
     for i, (x, y, w, h) in enumerate(boxes):
         text = texts[i] if texts and i < len(texts) else ""
         is_alert = text.replace(" ", "").upper() in alert_plates
 
-        # Color: rojo para alertas, verde para normales
-        color = (0, 0, 255) if is_alert else (0, 255, 0)
-        thickness = 3 if is_alert else 2
+        color = (255, 0, 0) if is_alert else (0, 255, 0)
+        width = 3 if is_alert else 2
 
-        cv2.rectangle(annotated, (x, y), (x + w, y + h), color, thickness)
+        draw.rectangle([x, y, x + w, y + h], outline=color, width=width)
 
         if text:
-            # Fondo para el texto
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.7
-            text_size = cv2.getTextSize(text, font, font_scale, 2)[0]
-            cv2.rectangle(
-                annotated,
-                (x, y - text_size[1] - 10),
-                (x + text_size[0], y),
-                color, -1,
-            )
-            cv2.putText(
-                annotated, text, (x, y - 5),
-                font, font_scale, (255, 255, 255), 2,
-            )
+            draw.rectangle([x, y - 18, x + len(text) * 10, y], fill=color)
+            draw.text((x + 2, y - 16), text, fill=(255, 255, 255))
 
-    return annotated
+    return np.array(pil_image)

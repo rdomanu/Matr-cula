@@ -1,96 +1,92 @@
-"""Captura de video optimizada para deteccion de matriculas en movimiento."""
+"""Captura de video via navegador web (getUserMedia).
 
-import time
+En vez de usar OpenCV (no disponible en Termux), la camara se captura
+desde el navegador del movil usando JavaScript getUserMedia.
+Los frames se envian como JPEG base64 al servidor via WebSocket.
+"""
+
+import base64
 import threading
+import time
+from io import BytesIO
 
-import cv2
-
-import config
+import numpy as np
+from PIL import Image
 
 
 class Camera:
-    """Gestor de captura de video con buffer circular y control de FPS."""
+    """Gestor de frames recibidos desde el navegador."""
 
-    def __init__(self, source=None, fps=None, width=None, height=None):
-        self.source = source if source is not None else config.CAMERA_SOURCE
-        self.target_fps = fps or config.CAMERA_FPS
-        self.width = width or config.CAMERA_WIDTH
-        self.height = height or config.CAMERA_HEIGHT
-
-        self._cap = None
-        self._frame = None
+    def __init__(self):
+        self._frame = None  # PIL Image
+        self._frame_np = None  # numpy array
         self._lock = threading.Lock()
         self._running = False
-        self._thread = None
         self._frame_count = 0
         self._start_time = None
 
     def start(self):
-        """Inicia la captura de video en un hilo separado."""
-        if self._running:
-            return
-
-        self._cap = cv2.VideoCapture(self.source)
-        if not self._cap.isOpened():
-            raise RuntimeError(
-                f"No se puede abrir la camara: {self.source}. "
-                "Verifica que la camara esta disponible o la URL es correcta."
-            )
-
-        # Configurar resolucion
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-
-        # Buffer minimo para reducir latencia
-        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-
         self._running = True
         self._start_time = time.time()
         self._frame_count = 0
 
-        # Hilo de captura para no bloquear el procesamiento
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._thread.start()
+    def stop(self):
+        self._running = False
+        with self._lock:
+            self._frame = None
+            self._frame_np = None
 
-    def _capture_loop(self):
-        """Loop de captura en hilo separado."""
-        frame_interval = 1.0 / self.target_fps
+    def receive_frame(self, data_url):
+        """Recibe un frame del navegador como data URL base64.
 
-        while self._running:
-            start = time.time()
+        Args:
+            data_url: String "data:image/jpeg;base64,..." del canvas del navegador.
+        """
+        try:
+            # Extraer base64 del data URL
+            if "," in data_url:
+                base64_data = data_url.split(",", 1)[1]
+            else:
+                base64_data = data_url
 
-            ret, frame = self._cap.read()
-            if ret:
-                with self._lock:
-                    self._frame = frame
-                    self._frame_count += 1
+            image_bytes = base64.b64decode(base64_data)
+            pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            np_image = np.array(pil_image)
 
-            # Controlar FPS
-            elapsed = time.time() - start
-            sleep_time = frame_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            with self._lock:
+                self._frame = pil_image
+                self._frame_np = np_image
+                self._frame_count += 1
+
+        except Exception:
+            pass
 
     def read(self):
-        """Obtiene el frame mas reciente.
+        """Obtiene el frame mas reciente como numpy array (RGB).
 
         Returns:
-            Frame BGR o None si no hay frame disponible.
+            numpy array RGB o None.
         """
+        with self._lock:
+            if self._frame_np is not None:
+                return self._frame_np.copy()
+            return None
+
+    def read_pil(self):
+        """Obtiene el frame mas reciente como PIL Image."""
         with self._lock:
             if self._frame is not None:
                 return self._frame.copy()
             return None
 
-    def stop(self):
-        """Detiene la captura de video."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=3)
-        if self._cap:
-            self._cap.release()
-            self._cap = None
-        self._frame = None
+    def get_frame_jpeg(self):
+        """Obtiene el frame actual como bytes JPEG."""
+        with self._lock:
+            if self._frame is None:
+                return None
+            buffer = BytesIO()
+            self._frame.save(buffer, format="JPEG", quality=70)
+            return buffer.getvalue()
 
     @property
     def is_running(self):
@@ -98,7 +94,6 @@ class Camera:
 
     @property
     def fps_actual(self):
-        """FPS real medidos."""
         if self._start_time and self._frame_count > 0:
             elapsed = time.time() - self._start_time
             if elapsed > 0:
@@ -108,18 +103,3 @@ class Camera:
     @property
     def frame_count(self):
         return self._frame_count
-
-    def get_frame_jpeg(self):
-        """Obtiene el frame actual codificado como JPEG para streaming web.
-
-        Returns:
-            bytes JPEG o None.
-        """
-        frame = self.read()
-        if frame is None:
-            return None
-        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        return buffer.tobytes()
-
-    def __del__(self):
-        self.stop()
