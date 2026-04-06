@@ -1,127 +1,140 @@
-"""Deteccion de regiones de matricula en un frame (sin OpenCV, solo Pillow+numpy)."""
+"""Deteccion de matriculas escaneando texto en el frame completo con Tesseract."""
 
+import re
 import numpy as np
 from PIL import Image, ImageDraw
 
 import config
+from core.plate_validator import validate_plate, normalize_plate
 
 
-def _find_plate_regions(np_image):
-    """Detecta regiones rectangulares que podrian ser matriculas.
+def _scan_frame_for_text(pil_image):
+    """Escanea un frame completo con Tesseract y devuelve bloques de texto con posicion.
 
-    Usa analisis de bordes simplificado con numpy.
-    Las matriculas espanolas son rectangulos blancos con ratio ~4.7:1.
+    Returns:
+        Lista de dicts con: text, x, y, w, h, conf
     """
-    if np_image is None or np_image.size == 0:
+    import pytesseract
+
+    # Preprocesar para mejorar deteccion
+    gray = pil_image.convert("L")
+
+    # Tesseract: obtener todos los bloques de texto con posicion y confianza
+    try:
+        data = pytesseract.image_to_data(
+            gray,
+            config="--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            output_type=pytesseract.Output.DICT,
+        )
+    except Exception:
         return []
 
-    h, w = np_image.shape[:2]
+    blocks = []
+    n = len(data["text"])
+    for i in range(n):
+        text = data["text"][i].strip()
+        conf = int(data["conf"][i]) if str(data["conf"][i]).lstrip('-').isdigit() else 0
+        if text and conf > 20 and len(text) >= 2:
+            blocks.append({
+                "text": text.upper(),
+                "x": data["left"][i],
+                "y": data["top"][i],
+                "w": data["width"][i],
+                "h": data["height"][i],
+                "conf": conf / 100.0,
+            })
 
-    # Convertir a escala de grises si es color
-    if len(np_image.shape) == 3:
-        gray = np.mean(np_image, axis=2).astype(np.uint8)
-    else:
-        gray = np_image
+    return blocks
 
-    # Buscar regiones blancas/claras (fondo de matricula)
-    # Las matriculas espanolas tienen fondo blanco (valor alto)
-    white_mask = gray > 180
 
-    # Buscar filas con suficientes pixeles blancos consecutivos
-    candidates = []
+def _merge_nearby_blocks(blocks, max_gap=50):
+    """Une bloques de texto cercanos horizontalmente (caracteres de una misma matricula)."""
+    if not blocks:
+        return []
 
-    # Escanear en bloques para encontrar regiones claras rectangulares
-    step_y = max(2, h // 80)
-    step_x = max(2, w // 80)
+    # Ordenar por posicion Y luego X
+    sorted_blocks = sorted(blocks, key=lambda b: (b["y"], b["x"]))
 
-    for y in range(0, h - config.PLATE_MIN_HEIGHT, step_y):
-        for x in range(0, w - config.PLATE_MIN_WIDTH, step_x):
-            # Probar varios tamanos de ventana
-            for pw in range(config.PLATE_MIN_WIDTH, min(config.PLATE_MAX_WIDTH, w - x), 40):
-                ph = int(pw / 4.7)  # Ratio de matricula espanola
-                if ph < config.PLATE_MIN_HEIGHT or y + ph > h:
-                    continue
-                if ph > config.PLATE_MAX_HEIGHT:
-                    break
+    merged = []
+    current = dict(sorted_blocks[0])
 
-                # Comprobar si la region es mayoritariamente blanca
-                region = white_mask[y:y + ph, x:x + pw]
-                white_ratio = np.mean(region)
+    for b in sorted_blocks[1:]:
+        # Si estan en la misma linea (Y similar) y cerca horizontalmente
+        y_overlap = abs(b["y"] - current["y"]) < max(current["h"], b["h"])
+        x_gap = b["x"] - (current["x"] + current["w"])
 
-                if 0.4 <= white_ratio <= 0.85:
-                    # Comprobar que hay variacion (caracteres oscuros sobre fondo claro)
-                    region_gray = gray[y:y + ph, x:x + pw]
-                    std = np.std(region_gray)
-                    if std > 35:
-                        candidates.append((x, y, pw, ph, std))
+        if y_overlap and 0 <= x_gap <= max_gap:
+            # Unir
+            current["text"] += b["text"]
+            new_x2 = max(current["x"] + current["w"], b["x"] + b["w"])
+            current["w"] = new_x2 - current["x"]
+            current["h"] = max(current["h"], b["h"])
+            current["conf"] = (current["conf"] + b["conf"]) / 2
+        else:
+            merged.append(current)
+            current = dict(b)
 
-    # Eliminar duplicados solapados (NMS simple)
-    candidates.sort(key=lambda c: c[4], reverse=True)  # Ordenar por contraste
-    filtered = []
-    for cand in candidates:
-        x, y, pw, ph, _ = cand
-        overlap = False
-        for fx, fy, fpw, fph in filtered:
-            # Comprobar solapamiento
-            ox = max(0, min(x + pw, fx + fpw) - max(x, fx))
-            oy = max(0, min(y + ph, fy + fph) - max(y, fy))
-            overlap_area = ox * oy
-            cand_area = pw * ph
-            if overlap_area > 0.3 * cand_area:
-                overlap = True
-                break
-        if not overlap:
-            filtered.append((x, y, pw, ph))
-            if len(filtered) >= 10:  # Maximo 10 candidatos
-                break
-
-    return filtered
+    merged.append(current)
+    return merged
 
 
 def detect_all_plates(frame):
-    """Detecta todas las matriculas en un frame.
+    """Detecta matriculas escaneando texto en el frame completo.
+
+    Estrategia: Tesseract lee TODO el texto visible en el frame,
+    luego filtramos con regex los que coinciden con formato de matricula espanola.
 
     Args:
-        frame: numpy array RGB del frame de la camara.
+        frame: numpy array RGB del frame.
 
     Returns:
-        Lista de tuplas (x, y, w, h) de las regiones detectadas.
-        Lista de numpy arrays recortados de cada region.
+        boxes: Lista de (x, y, w, h) de matriculas encontradas.
+        plate_images: Lista de numpy arrays recortados.
     """
     if frame is None or frame.size == 0:
         return [], []
 
-    regions = _find_plate_regions(frame)
+    pil_image = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame
 
+    # Escanear todo el texto del frame
+    blocks = _scan_frame_for_text(pil_image)
+
+    # Unir bloques cercanos (una matricula puede ser detectada como varios trozos)
+    merged = _merge_nearby_blocks(blocks)
+
+    # Filtrar los que parecen matriculas espanolas
+    boxes = []
     plate_images = []
-    valid_boxes = []
-    for (x, y, w, h) in regions:
-        # Margen extra del 5%
-        margin_x = int(w * 0.05)
-        margin_y = int(h * 0.05)
-        y1 = max(0, y - margin_y)
-        y2 = min(frame.shape[0], y + h + margin_y)
-        x1 = max(0, x - margin_x)
-        x2 = min(frame.shape[1], x + w + margin_x)
 
-        plate_img = frame[y1:y2, x1:x2]
-        if plate_img.size > 0:
-            plate_images.append(plate_img)
-            valid_boxes.append((x1, y1, x2 - x1, y2 - y1))
+    for block in merged:
+        text = re.sub(r"[^A-Z0-9]", "", block["text"])
 
-    return valid_boxes, plate_images
+        # Intentar validar como matricula
+        validation = validate_plate(text)
+        if validation:
+            x, y, w, h = block["x"], block["y"], block["w"], block["h"]
+
+            # Margen extra
+            margin = 10
+            y1 = max(0, y - margin)
+            y2 = min(frame.shape[0], y + h + margin)
+            x1 = max(0, x - margin)
+            x2 = min(frame.shape[1], x + w + margin)
+
+            plate_img = frame[y1:y2, x1:x2]
+            if plate_img.size > 0:
+                boxes.append((x1, y1, x2 - x1, y2 - y1))
+                plate_images.append(plate_img)
+
+    return boxes, plate_images
 
 
 def draw_detections(frame, boxes, texts=None, alert_plates=None):
-    """Dibuja rectangulos sobre las matriculas detectadas.
-
-    Returns:
-        numpy array RGB con anotaciones.
-    """
+    """Dibuja rectangulos sobre las matriculas detectadas."""
     if frame is None:
         return frame
 
-    pil_image = Image.fromarray(frame)
+    pil_image = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame.copy()
     draw = ImageDraw.Draw(pil_image)
     alert_plates = alert_plates or set()
 
@@ -133,7 +146,6 @@ def draw_detections(frame, boxes, texts=None, alert_plates=None):
         width = 3 if is_alert else 2
 
         draw.rectangle([x, y, x + w, y + h], outline=color, width=width)
-
         if text:
             draw.rectangle([x, y - 18, x + len(text) * 10, y], fill=color)
             draw.text((x + 2, y - 16), text, fill=(255, 255, 255))

@@ -62,82 +62,66 @@ def detection_loop():
     """Bucle principal de deteccion de matriculas."""
     global detection_running, annotated_frame, log_all_plates
 
+    last_frame_id = 0
+
     while detection_running:
         frame = camera.read()
         if frame is None:
-            time.sleep(0.1)
+            time.sleep(0.2)
             continue
 
-        # Detectar todas las matriculas en el frame
+        # Evitar procesar el mismo frame dos veces
+        current_id = camera.frame_count
+        if current_id == last_frame_id:
+            time.sleep(0.1)
+            continue
+        last_frame_id = current_id
+
+        # Detectar matriculas (Tesseract escanea TODO el frame)
         boxes, plate_images = detect_all_plates(frame)
 
         texts = []
         watchlist_plates = alert_manager.get_watchlist_plates()
 
         for i, plate_img in enumerate(plate_images):
-            # Preprocesar para OCR
+            # Leer matricula con OCR del recorte
             processed = preprocess_plate_ocr(plate_img)
-            if processed is None:
+            raw_text, confidence = read_plate(processed if processed is not None else plate_img)
+
+            if raw_text is None:
                 texts.append("")
                 continue
 
-            # Leer texto crudo del OCR (sin cache ni validacion)
-            raw_text, confidence = read_plate(processed)
-
-            # --- CAPTURA AUTOMATICA DE FRAMES DIFICILES ---
-            # Caso 1: OCR no pudo leer nada -> guardar para entrenamiento
-            if raw_text is None and config.TRAINING_CAPTURE_FAILED:
-                training_collector.save_difficult_frame(
-                    plate_img, None, 0, CAPTURE_REASON_FAILED
-                )
-                texts.append("")
-                continue
-
-            # Validar formato espanol
             validation = validate_plate(raw_text)
-
-            # Caso 2: Leyo algo pero formato invalido -> guardar
             if validation is None:
-                if config.TRAINING_CAPTURE_FAILED:
-                    training_collector.save_difficult_frame(
-                        plate_img, raw_text, confidence, CAPTURE_REASON_INVALID
-                    )
                 texts.append("")
                 continue
 
-            # Caso 3: Confianza baja -> guardar para revision manual
-            if confidence < config.TRAINING_LOW_CONF_THRESHOLD and config.TRAINING_CAPTURE_LOW_CONF:
-                training_collector.save_difficult_frame(
-                    plate_img, raw_text, confidence, CAPTURE_REASON_LOW_CONF
-                )
-
-            # Caso 4: Lectura correcta, muestreo aleatorio (variedad de ejemplos)
-            elif training_collector.should_random_sample():
-                training_collector.save_difficult_frame(
-                    plate_img, raw_text, confidence, CAPTURE_REASON_RANDOM
-                )
-
-            # --- PROCESAMIENTO NORMAL ---
             plate_text = validation["plate"]
             plate_normalized = validation["normalized"]
             plate_type = validation["type"]
 
-            # Comprobar cache deduplicacion
-            from core.ocr_engine import plate_cache as _pc
-            if _pc.contains(plate_normalized):
+            # Deduplicacion
+            if plate_cache.contains(plate_normalized):
                 texts.append(plate_text)
                 continue
-            _pc.add(plate_normalized)
+            plate_cache.add(plate_normalized)
 
             texts.append(plate_text)
 
-            # Obtener GPS
+            # GPS
             lat, lon = gps_tracker.get_coords_str()
 
             # Registrar en CSV
             if log_all_plates:
                 detection_logger.log_detection(
                     plate_text, plate_type, confidence, lat, lon
+                )
+
+            # Muestreo aleatorio para entrenamiento
+            if training_collector.should_random_sample():
+                training_collector.save_difficult_frame(
+                    plate_img, raw_text, confidence, CAPTURE_REASON_RANDOM
                 )
 
             # Comprobar watchlist
@@ -160,21 +144,15 @@ def detection_loop():
                 "session_count": detection_logger.get_stats()["session_count"],
             })
 
-        # Dibujar anotaciones en el frame para streaming
-        annotated = draw_detections(frame, boxes, texts, watchlist_plates)
-        with frame_lock:
-            annotated_frame = annotated
-
-        # Enviar stats periodicamente
+        # Stats
         socketio.emit("stats_update", {
             "session_count": detection_logger.get_stats()["session_count"],
             "fps": round(camera.fps_actual, 1),
             "gps_status": "OK" if gps_tracker.has_fix else "Sin GPS",
         })
 
-    # Limpiar al detener
-    with frame_lock:
-        annotated_frame = None
+        # No procesar mas de ~2 frames/seg (Tesseract es lento)
+        time.sleep(0.5)
 
 
 def generate_video_feed():
@@ -473,9 +451,17 @@ if __name__ == "__main__":
     os.makedirs(config.ALERTS_DIR, exist_ok=True)
     os.makedirs(config.TRAINING_PLATES_DIR, exist_ok=True)
 
+    # Verificar Tesseract
+    import shutil
+    if shutil.which("tesseract"):
+        print("  Tesseract OCR: OK")
+    else:
+        print("  AVISO: Tesseract no encontrado. Instala con: pkg install tesseract")
+
     print("=" * 50)
     print("  MatriScan - Lector de Matriculas Espanolas")
     print(f"  Servidor: http://{config.FLASK_HOST}:{config.FLASK_PORT}")
+    print("  Abre Chrome en esa direccion")
     print("=" * 50)
 
     socketio.run(
