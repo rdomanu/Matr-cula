@@ -1,26 +1,14 @@
-"""Motor OCR para lectura de matriculas usando EasyOCR."""
+"""Motor OCR para lectura de matriculas usando Tesseract."""
 
 import re
 import time
 from collections import OrderedDict
 
+import pytesseract
+from PIL import Image
+import numpy as np
+
 import config
-
-# Importacion lazy de EasyOCR (pesado, solo cargar cuando se necesite)
-_reader = None
-
-
-def _get_reader():
-    """Inicializa EasyOCR reader de forma lazy."""
-    global _reader
-    if _reader is None:
-        import easyocr
-        _reader = easyocr.Reader(
-            config.OCR_LANGUAGES,
-            gpu=config.OCR_GPU,
-            verbose=False,
-        )
-    return _reader
 
 
 # Cache LRU de matriculas recientes para deduplicacion
@@ -33,7 +21,6 @@ class PlateCache:
         self._ttl = ttl_seconds
 
     def contains(self, plate_normalized):
-        """Comprueba si la matricula esta en cache y no ha expirado."""
         if plate_normalized in self._cache:
             timestamp = self._cache[plate_normalized]
             if time.time() - timestamp < self._ttl:
@@ -43,27 +30,29 @@ class PlateCache:
         return False
 
     def add(self, plate_normalized):
-        """Anade matricula al cache."""
         self._cache[plate_normalized] = time.time()
-        # Limpiar entradas mas antiguas si excede el tamano
         while len(self._cache) > self._max_size:
             self._cache.popitem(last=False)
 
     def clear(self):
-        """Limpia el cache."""
         self._cache.clear()
 
 
-# Instancia global del cache
 plate_cache = PlateCache(
     max_size=config.RECENT_PLATES_CACHE_SIZE,
     ttl_seconds=config.RECENT_PLATES_TTL_SECONDS,
 )
 
 
+# Configuracion de Tesseract optimizada para matriculas
+TESSERACT_CONFIG = (
+    "--oem 3 --psm 7 "  # PSM 7 = tratar como una linea de texto
+    "-c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+
 # Tabla de correcciones comunes en OCR de matriculas
 CHAR_CORRECTIONS = {
-    # En posiciones donde se esperan digitos
     "digits": {
         "O": "0", "o": "0",
         "I": "1", "i": "1", "l": "1", "|": "1",
@@ -72,9 +61,7 @@ CHAR_CORRECTIONS = {
         "G": "6", "g": "6",
         "T": "7",
         "B": "8",
-        "g": "9",
     },
-    # En posiciones donde se esperan letras
     "letters": {
         "0": "O",
         "1": "I",
@@ -91,32 +78,27 @@ def _correct_ocr_text(text):
     if not text:
         return text
 
-    # Limpiar caracteres no alfanumericos
     cleaned = re.sub(r"[^A-Za-z0-9]", "", text.upper())
 
     if len(cleaned) < 4:
         return cleaned
 
-    # Intentar correccion para formato moderno: 4 digitos + 3 letras
+    # Formato moderno: 4 digitos + 3 letras
     if len(cleaned) == 7:
         digits_part = list(cleaned[:4])
         letters_part = list(cleaned[4:])
 
-        # Corregir digitos
         for i, ch in enumerate(digits_part):
             if ch in CHAR_CORRECTIONS["digits"]:
                 digits_part[i] = CHAR_CORRECTIONS["digits"][ch]
 
-        # Corregir letras
         for i, ch in enumerate(letters_part):
             if ch in CHAR_CORRECTIONS["letters"]:
                 letters_part[i] = CHAR_CORRECTIONS["letters"][ch]
 
-        corrected = "".join(digits_part) + "".join(letters_part)
-        return corrected
+        return "".join(digits_part) + "".join(letters_part)
 
-    # Para formato antiguo: intentar separar provincia + numeros + letras
-    # Ej: M1234AB, BA1234CD
+    # Formato antiguo
     match = re.match(r"^([A-Z]{1,2})(\d{4,6})([A-Z]{0,2})$", cleaned)
     if match:
         return cleaned
@@ -125,10 +107,10 @@ def _correct_ocr_text(text):
 
 
 def read_plate(image):
-    """Lee el texto de una imagen de matricula preprocesada.
+    """Lee el texto de una imagen de matricula usando Tesseract.
 
     Args:
-        image: Imagen de la matricula (BGR o escala de grises).
+        image: Imagen de la matricula (numpy array BGR o escala de grises).
 
     Returns:
         Tupla (texto, confianza) o (None, 0) si no se puede leer.
@@ -136,41 +118,46 @@ def read_plate(image):
     if image is None or image.size == 0:
         return None, 0.0
 
-    reader = _get_reader()
-
     try:
-        results = reader.readtext(
-            image,
-            detail=1,
-            paragraph=False,
-            allowlist="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        # Convertir numpy array a PIL Image
+        if len(image.shape) == 3:
+            pil_image = Image.fromarray(image[:, :, ::-1])  # BGR -> RGB
+        else:
+            pil_image = Image.fromarray(image)
+
+        # Obtener texto con datos de confianza
+        data = pytesseract.image_to_data(
+            pil_image,
+            config=TESSERACT_CONFIG,
+            output_type=pytesseract.Output.DICT,
         )
+
+        # Extraer texto y confianza
+        texts = []
+        confidences = []
+        for i, conf in enumerate(data["conf"]):
+            conf_val = int(conf) if str(conf).lstrip('-').isdigit() else 0
+            text = data["text"][i].strip()
+            if conf_val > 0 and text:
+                texts.append(text)
+                confidences.append(conf_val / 100.0)
+
+        if not texts:
+            return None, 0.0
+
+        full_text = "".join(texts)
+        avg_confidence = sum(confidences) / len(confidences)
+
+        # Aplicar correcciones
+        corrected = _correct_ocr_text(full_text)
+
+        if not corrected or len(corrected) < 4:
+            return None, 0.0
+
+        return corrected, avg_confidence
+
     except Exception:
         return None, 0.0
-
-    if not results:
-        return None, 0.0
-
-    # Concatenar todos los textos detectados (puede haber multiples bloques)
-    full_text = ""
-    total_confidence = 0
-    count = 0
-
-    for (_, text, confidence) in results:
-        if confidence >= config.OCR_CONFIDENCE_THRESHOLD:
-            full_text += text
-            total_confidence += confidence
-            count += 1
-
-    if count == 0:
-        return None, 0.0
-
-    avg_confidence = total_confidence / count
-
-    # Aplicar correcciones
-    corrected = _correct_ocr_text(full_text)
-
-    return corrected, avg_confidence
 
 
 def read_plate_cached(image, plate_validator_fn):
@@ -187,17 +174,14 @@ def read_plate_cached(image, plate_validator_fn):
     if text is None:
         return None, 0.0
 
-    # Validar formato espanol
     validation = plate_validator_fn(text)
     if validation is None:
         return None, 0.0
 
-    # Comprobar cache para deduplicacion
     normalized = validation["normalized"]
     if plate_cache.contains(normalized):
-        return None, 0.0  # Ya leida recientemente
+        return None, 0.0
 
-    # Anadir al cache
     plate_cache.add(normalized)
 
     return validation, confidence

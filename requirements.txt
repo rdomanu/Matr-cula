@@ -1,6 +1,7 @@
-# Dependencias Python que se instalan via pip (las ligeras)
+# Dependencias Python ligeras (pip)
 flask==3.1.0
 flask-socketio==5.5.1
 Pillow==10.4.0
 gevent==24.11.1
 gevent-websocket==0.10.1
+pytesseract==0.3.13
