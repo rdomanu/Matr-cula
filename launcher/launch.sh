@@ -5,13 +5,6 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Activar entorno virtual
-source venv/bin/activate 2>/dev/null || {
-    echo "Error: No se encontro el entorno virtual."
-    echo "Ejecuta primero: bash setup_termux.sh"
-    exit 1
-}
-
 # Matar instancia anterior si existe
 pkill -f "python app.py" 2>/dev/null
 sleep 1
