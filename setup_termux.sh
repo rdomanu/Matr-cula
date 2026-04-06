@@ -58,9 +58,14 @@ with wave.open('static/sounds/alert.wav', 'w') as f:
 print('OK')
 " 2>/dev/null || echo "(se generara despues)"
 
+# Generar dataset sintetico de entrenamiento
+echo ""
+echo "[6/7] Generando 200 matriculas sinteticas de entrenamiento..."
+python -m training.generate_plates --count 200
+
 # Crear script de lanzamiento
 echo ""
-echo "[6/6] Creando script de lanzamiento..."
+echo "[7/7] Creando script de lanzamiento..."
 cat > launch.sh << 'LAUNCH'
 #!/bin/bash
 cd "$(dirname "$0")"
