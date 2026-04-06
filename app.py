@@ -11,7 +11,7 @@ from flask_socketio import SocketIO
 import config
 from core.camera import Camera
 from core.detector import detect_all_plates, draw_detections
-from core.preprocessor import preprocess_for_easyocr
+from core.preprocessor import preprocess_for_easyocr as preprocess_plate_ocr
 from core.ocr_engine import read_plate, read_plate_cached, plate_cache
 from core.plate_validator import validate_plate, normalize_plate
 from core.alert_manager import AlertManager
@@ -74,7 +74,7 @@ def detection_loop():
 
         for i, plate_img in enumerate(plate_images):
             # Preprocesar para OCR
-            processed = preprocess_for_easyocr(plate_img)
+            processed = preprocess_plate_ocr(plate_img)
             if processed is None:
                 texts.append("")
                 continue
