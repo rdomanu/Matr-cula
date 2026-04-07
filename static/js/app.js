@@ -1,13 +1,110 @@
 /**
- * MatriScan - Frontend JavaScript
- * Gestion de la interfaz web SPA con WebSocket para actualizaciones en tiempo real.
+ * MatriScan - Frontend con OCR en el navegador (Tesseract.js)
+ *
+ * Todo el procesamiento OCR corre directamente en Chrome,
+ * sin necesidad de enviar frames al servidor Python.
+ * El servidor solo gestiona watchlist, historial y datos.
  */
 
 const socket = io();
 let isRunning = false;
 let soundEnabled = true;
 let cameraStream = null;
-let captureInterval = null;
+let ocrWorker = null;
+let processing = false;
+
+// --- Regex de matriculas espanolas ---
+const MODERN_REGEX = /\b(\d{4})\s?([BCDFGHJKLMNPRSTVWXYZ]{3})\b/g;
+const OLD_REGEX = /\b([A-Z]{1,2})\s?(\d{4})\s?([A-Z]{2})\b/g;
+
+// Correcciones OCR comunes
+const DIGIT_FIX = {'O':'0','o':'0','I':'1','i':'1','l':'1','S':'5','s':'5','Z':'2','z':'2','B':'8','G':'6','T':'7'};
+const LETTER_FIX = {'0':'O','1':'I','2':'Z','5':'S','6':'G','8':'B'};
+const MODERN_LETTERS = 'BCDFGHJKLMNPRSTVWXYZ';
+
+function correctPlateText(raw) {
+    let cleaned = raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (cleaned.length === 7) {
+        // Intentar formato moderno: 4 digitos + 3 letras
+        let digits = cleaned.slice(0, 4).split('').map(c => DIGIT_FIX[c] || c).join('');
+        let letters = cleaned.slice(4).split('').map(c => LETTER_FIX[c] || c).join('');
+        let corrected = digits + letters;
+        if (/^\d{4}[A-Z]{3}$/.test(corrected)) {
+            let validLetters = letters.split('').every(l => MODERN_LETTERS.includes(l));
+            if (validLetters) return corrected;
+        }
+    }
+    return cleaned;
+}
+
+function findPlates(text) {
+    let plates = [];
+    let seen = new Set();
+
+    // Limpiar texto
+    let cleaned = text.toUpperCase().replace(/[^A-Z0-9\s\n]/g, '');
+
+    // Buscar fragmentos de 6-10 caracteres alfanumericos consecutivos
+    let words = cleaned.split(/\s+/);
+
+    // Intentar unir palabras consecutivas
+    for (let i = 0; i < words.length; i++) {
+        // Probar palabra sola
+        let tests = [words[i]];
+        // Probar union con siguiente
+        if (i + 1 < words.length) tests.push(words[i] + words[i+1]);
+        // Probar union con 2 siguientes
+        if (i + 2 < words.length) tests.push(words[i] + words[i+1] + words[i+2]);
+
+        for (let raw of tests) {
+            let corrected = correctPlateText(raw);
+            if (corrected.length < 5 || corrected.length > 10) continue;
+
+            // Formato moderno: 4 digitos + 3 letras consonantes
+            let modernMatch = corrected.match(/^(\d{4})([BCDFGHJKLMNPRSTVWXYZ]{3})$/);
+            if (modernMatch && !seen.has(corrected)) {
+                seen.add(corrected);
+                plates.push({
+                    plate: modernMatch[1] + ' ' + modernMatch[2],
+                    normalized: corrected,
+                    type: 'modern'
+                });
+            }
+
+            // Formato antiguo: 1-2 letras + 4 digitos + 2 letras
+            let oldMatch = corrected.match(/^([A-Z]{1,2})(\d{4})([A-Z]{2})$/);
+            if (oldMatch && !seen.has(corrected)) {
+                seen.add(corrected);
+                plates.push({
+                    plate: oldMatch[1] + ' ' + oldMatch[2] + ' ' + oldMatch[3],
+                    normalized: corrected,
+                    type: 'old_alpha'
+                });
+            }
+        }
+    }
+    return plates;
+}
+
+// --- Inicializar Tesseract.js ---
+async function initOCR() {
+    try {
+        document.getElementById('video-placeholder').textContent = 'Cargando motor OCR...';
+        ocrWorker = await Tesseract.createWorker('eng', 1, {
+            workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+            corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core-simd-lstm.wasm.js',
+        });
+        await ocrWorker.setParameters({
+            tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+            tessedit_pageseg_mode: '11', // Sparse text
+        });
+        console.log('Tesseract.js listo');
+        document.getElementById('video-placeholder').textContent = 'Pulsa START para iniciar la camara';
+    } catch (err) {
+        console.error('Error cargando Tesseract.js:', err);
+        document.getElementById('video-placeholder').textContent = 'Error cargando OCR. Recarga la pagina.';
+    }
+}
 
 // --- Navegacion SPA ---
 document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -17,8 +114,6 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
         document.querySelectorAll('.section').forEach(s => s.classList.add('hidden'));
         tab.classList.add('active');
         document.getElementById('section-' + section).classList.remove('hidden');
-
-        // Cargar datos al cambiar de seccion
         if (section === 'watchlist') loadWatchlist();
         if (section === 'history') loadHistory();
         if (section === 'training') loadTraining();
@@ -26,10 +121,26 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
     });
 });
 
-// --- Dashboard: Start/Stop con camara del navegador ---
+// --- Cache de deduplicacion ---
+let recentPlates = {};
+function isRecent(normalized) {
+    let now = Date.now();
+    if (recentPlates[normalized] && now - recentPlates[normalized] < 5000) return true;
+    recentPlates[normalized] = now;
+    // Limpiar antiguos
+    for (let k in recentPlates) {
+        if (now - recentPlates[k] > 30000) delete recentPlates[k];
+    }
+    return false;
+}
+
+// --- Dashboard: Start/Stop ---
 document.getElementById('btn-start').addEventListener('click', async () => {
+    if (!ocrWorker) {
+        alert('Motor OCR aun cargando. Espera unos segundos.');
+        return;
+    }
     try {
-        // Pedir acceso a la camara trasera del movil
         cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false
@@ -39,21 +150,12 @@ document.getElementById('btn-start').addEventListener('click', async () => {
         video.style.display = 'block';
         document.getElementById('video-placeholder').style.display = 'none';
 
-        // Avisar al servidor que empiece a procesar
-        socket.emit('start_detection');
+        isRunning = true;
+        document.getElementById('btn-start').classList.add('hidden');
+        document.getElementById('btn-stop').classList.remove('hidden');
 
-        // Enviar frames al servidor cada 100ms (~10 FPS)
-        const canvas = document.getElementById('camera-canvas');
-        captureInterval = setInterval(() => {
-            if (!isRunning) return;
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            if (canvas.width === 0) return;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-            socket.emit('camera_frame', dataUrl);
-        }, 100);
+        socket.emit('start_detection');
+        processFrames();
 
     } catch (err) {
         alert('No se puede acceder a la camara: ' + err.message);
@@ -61,33 +163,77 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 });
 
 document.getElementById('btn-stop').addEventListener('click', () => {
-    socket.emit('stop_detection');
-    stopCamera();
-});
-
-function stopCamera() {
-    if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
-    if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
-    const video = document.getElementById('camera-video');
-    video.style.display = 'none';
-    video.srcObject = null;
-}
-
-socket.on('detection_started', () => {
-    isRunning = true;
-    document.getElementById('btn-start').classList.add('hidden');
-    document.getElementById('btn-stop').classList.remove('hidden');
-});
-
-socket.on('detection_stopped', () => {
     isRunning = false;
+    socket.emit('stop_detection');
     stopCamera();
     document.getElementById('btn-stop').classList.add('hidden');
     document.getElementById('btn-start').classList.remove('hidden');
     document.getElementById('video-placeholder').style.display = 'flex';
+    document.getElementById('video-placeholder').textContent = 'Pulsa START para iniciar';
 });
 
-// --- Actualizaciones en tiempo real ---
+function stopCamera() {
+    if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+}
+
+// --- Bucle de procesamiento OCR en el navegador ---
+async function processFrames() {
+    const video = document.getElementById('camera-video');
+    const canvas = document.getElementById('camera-canvas');
+    const ctx = canvas.getContext('2d');
+    let frameCount = 0;
+
+    while (isRunning) {
+        if (processing || video.videoWidth === 0) {
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+        }
+
+        processing = true;
+        frameCount++;
+
+        try {
+            // Capturar frame del video
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+
+            // OCR con Tesseract.js (corre en el navegador)
+            const { data } = await ocrWorker.recognize(canvas);
+
+            // Buscar matriculas en el texto detectado
+            let plates = findPlates(data.text);
+
+            for (let plate of plates) {
+                if (isRecent(plate.normalized)) continue;
+
+                // Enviar al servidor para registrar
+                socket.emit('plate_found', {
+                    plate: plate.plate,
+                    normalized: plate.normalized,
+                    type: plate.type,
+                    confidence: 0.8,
+                });
+            }
+
+            // Actualizar stats
+            document.getElementById('stat-count').textContent = frameCount;
+            document.getElementById('stat-fps').textContent =
+                (frameCount / ((Date.now() - (window._startTime || Date.now())) / 1000)).toFixed(1);
+            if (!window._startTime) window._startTime = Date.now();
+
+        } catch (err) {
+            console.error('Error OCR:', err);
+        }
+
+        processing = false;
+
+        // Esperar antes del siguiente frame (~2 fps)
+        await new Promise(r => setTimeout(r, 500));
+    }
+}
+
+// --- Eventos del servidor ---
 socket.on('plate_detected', (data) => {
     updatePlatesList(data);
     document.getElementById('stat-count').textContent = data.session_count || '0';
@@ -98,8 +244,6 @@ socket.on('alert_triggered', (data) => {
 });
 
 socket.on('stats_update', (data) => {
-    document.getElementById('stat-count').textContent = data.session_count || '0';
-    document.getElementById('stat-fps').textContent = data.fps || '0';
     document.getElementById('stat-gps').textContent = data.gps_status || '--';
 });
 
@@ -113,15 +257,10 @@ function updatePlatesList(data) {
     item.className = 'plate-item' + (data.is_alert ? ' is-alert' : '');
     item.innerHTML = `
         <span class="plate-text">${data.plate || ''}</span>
-        <span class="plate-time">${data.time || ''}</span>
+        <span class="plate-time">${data.time || new Date().toLocaleTimeString()}${data.alias ? ' - ' + data.alias : ''}</span>
     `;
-
     list.insertBefore(item, list.firstChild);
-
-    // Mantener maximo 50 items
-    while (list.children.length > 50) {
-        list.removeChild(list.lastChild);
-    }
+    while (list.children.length > 50) list.removeChild(list.lastChild);
 }
 
 // --- Alerta visual y sonora ---
@@ -131,17 +270,13 @@ function showAlert(data) {
     document.getElementById('alert-alias').textContent = data.alias ? ' - ' + data.alias : '';
     banner.classList.remove('hidden');
 
-    // Sonido
     if (soundEnabled) {
         const audio = document.getElementById('alert-sound');
         audio.currentTime = 0;
         audio.play().catch(() => {});
     }
 
-    // Auto-ocultar despues de 10 segundos
-    setTimeout(() => {
-        banner.classList.add('hidden');
-    }, 10000);
+    setTimeout(() => { banner.classList.add('hidden'); }, 10000);
 }
 
 document.getElementById('alert-dismiss').addEventListener('click', () => {
@@ -150,29 +285,26 @@ document.getElementById('alert-dismiss').addEventListener('click', () => {
 
 // --- Watchlist ---
 function loadWatchlist() {
-    fetch('/api/watchlist')
-        .then(r => r.json())
-        .then(data => {
-            const container = document.getElementById('watchlist-items');
-            if (Object.keys(data).length === 0) {
-                container.innerHTML = '<p class="empty-msg">No hay matriculas en la lista de vigilancia</p>';
-                return;
-            }
-            container.innerHTML = '';
-            for (const [plate, info] of Object.entries(data)) {
-                const item = document.createElement('div');
-                item.className = 'wl-item';
-                item.innerHTML = `
-                    <div class="wl-item-info">
-                        <div class="wl-item-plate">${info.plate_display || plate}</div>
-                        <div class="wl-item-alias">${info.alias || ''}</div>
-                    </div>
-                    <button class="btn-remove" onclick="removePlate('${plate}')">X</button>
-                `;
-                container.appendChild(item);
-            }
-        })
-        .catch(() => {});
+    fetch('/api/watchlist').then(r => r.json()).then(data => {
+        const container = document.getElementById('watchlist-items');
+        if (Object.keys(data).length === 0) {
+            container.innerHTML = '<p class="empty-msg">No hay matriculas en la lista de vigilancia</p>';
+            return;
+        }
+        container.innerHTML = '';
+        for (const [plate, info] of Object.entries(data)) {
+            const item = document.createElement('div');
+            item.className = 'wl-item';
+            item.innerHTML = `
+                <div class="wl-item-info">
+                    <div class="wl-item-plate">${info.plate_display || plate}</div>
+                    <div class="wl-item-alias">${info.alias || ''}</div>
+                </div>
+                <button class="btn-remove" onclick="removePlate('${plate}')">X</button>
+            `;
+            container.appendChild(item);
+        }
+    }).catch(() => {});
 }
 
 document.getElementById('btn-add-plate').addEventListener('click', () => {
@@ -184,14 +316,11 @@ document.getElementById('btn-add-plate').addEventListener('click', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate, alias })
-    })
-    .then(r => r.json())
-    .then(data => {
+    }).then(r => r.json()).then(data => {
         document.getElementById('wl-plate').value = '';
         document.getElementById('wl-alias').value = '';
         loadWatchlist();
 
-        // Mostrar historial si se encontraron avistamientos previos
         const histResult = document.getElementById('wl-history-result');
         const histContent = document.getElementById('wl-history-content');
         if (data.history && data.history.length > 0) {
@@ -203,8 +332,7 @@ document.getElementById('btn-add-plate').addEventListener('click', () => {
             histResult.classList.remove('hidden');
             histContent.innerHTML = '<div>Esta matricula no se ha visto anteriormente.</div>';
         }
-    })
-    .catch(() => {});
+    }).catch(() => {});
 });
 
 function removePlate(plate) {
@@ -212,27 +340,18 @@ function removePlate(plate) {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate })
-    })
-    .then(() => loadWatchlist())
-    .catch(() => {});
+    }).then(() => loadWatchlist()).catch(() => {});
 }
 
-// Exportar watchlist
 document.getElementById('btn-export-wl').addEventListener('click', () => {
-    fetch('/api/watchlist/export')
-        .then(r => r.blob())
-        .then(blob => {
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'watchlist.json';
-            a.click();
-            URL.revokeObjectURL(url);
-        })
-        .catch(() => {});
+    fetch('/api/watchlist/export').then(r => r.blob()).then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'watchlist.json';
+        a.click();
+    }).catch(() => {});
 });
 
-// Importar watchlist
 document.getElementById('btn-import-wl').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -244,85 +363,47 @@ document.getElementById('btn-import-wl').addEventListener('change', (e) => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
-            })
-            .then(() => loadWatchlist())
-            .catch(() => {});
-        } catch (err) {
-            // JSON invalido
-        }
+            }).then(() => loadWatchlist());
+        } catch (err) {}
     };
     reader.readAsText(file);
 });
 
 // --- Historial ---
 function loadHistory() {
-    fetch('/api/history/recent')
-        .then(r => r.json())
-        .then(data => {
-            const tbody = document.getElementById('history-tbody');
-            tbody.innerHTML = '';
-            data.reverse().forEach(row => {
-                const tr = document.createElement('tr');
-                const lat = row.latitud || '--';
-                const lon = row.longitud || '--';
-                const loc = (lat !== '--' && lon !== '--') ? `${lat}, ${lon}` : '--';
-                tr.innerHTML = `
-                    <td>${row.fecha || ''}</td>
-                    <td>${row.hora || ''}</td>
-                    <td>${row.matricula || ''}</td>
-                    <td>${row.tipo || ''}</td>
-                    <td>${loc}</td>
-                `;
-                tbody.appendChild(tr);
-            });
-        })
-        .catch(() => {});
+    fetch('/api/history/recent').then(r => r.json()).then(data => {
+        const tbody = document.getElementById('history-tbody');
+        tbody.innerHTML = '';
+        data.reverse().forEach(row => {
+            const tr = document.createElement('tr');
+            const loc = (row.latitud && row.longitud) ? `${row.latitud}, ${row.longitud}` : '--';
+            tr.innerHTML = `<td>${row.fecha||''}</td><td>${row.hora||''}</td><td>${row.matricula||''}</td><td>${row.tipo||''}</td><td>${loc}</td>`;
+            tbody.appendChild(tr);
+        });
+    }).catch(() => {});
 
-    // Cargar lista de archivos CSV
-    fetch('/api/history/files')
-        .then(r => r.json())
-        .then(files => {
-            const container = document.getElementById('csv-files-list');
-            container.innerHTML = '';
-            files.forEach(f => {
-                const item = document.createElement('div');
-                item.className = 'csv-file-item';
-                item.innerHTML = `
-                    <span>${f.filename}</span>
-                    <span>${f.size_kb} KB</span>
-                `;
-                container.appendChild(item);
-            });
-        })
-        .catch(() => {});
+    fetch('/api/history/files').then(r => r.json()).then(files => {
+        const container = document.getElementById('csv-files-list');
+        container.innerHTML = '';
+        files.forEach(f => {
+            container.innerHTML += `<div class="csv-file-item"><span>${f.filename}</span><span>${f.size_kb} KB</span></div>`;
+        });
+    }).catch(() => {});
 }
 
 document.getElementById('btn-search-hist').addEventListener('click', () => {
-    const query = document.getElementById('hist-search').value.trim();
-    if (!query) {
-        loadHistory();
-        return;
-    }
-    fetch('/api/history/search?plate=' + encodeURIComponent(query))
-        .then(r => r.json())
-        .then(data => {
-            const tbody = document.getElementById('history-tbody');
-            tbody.innerHTML = '';
-            data.forEach(row => {
-                const tr = document.createElement('tr');
-                const loc = (row.latitud && row.longitud) ?
-                    `${row.latitud}, ${row.longitud}` : '--';
-                tr.innerHTML = `
-                    <td>${row.fecha || ''}</td>
-                    <td>${row.hora || ''}</td>
-                    <td>${query.toUpperCase()}</td>
-                    <td>--</td>
-                    <td>${loc}</td>
-                `;
-                tbody.appendChild(tr);
-            });
-        })
-        .catch(() => {});
+    const q = document.getElementById('hist-search').value.trim();
+    if (!q) { loadHistory(); return; }
+    fetch('/api/history/search?plate=' + encodeURIComponent(q)).then(r => r.json()).then(data => {
+        const tbody = document.getElementById('history-tbody');
+        tbody.innerHTML = '';
+        data.forEach(row => {
+            const tr = document.createElement('tr');
+            const loc = (row.latitud && row.longitud) ? `${row.latitud}, ${row.longitud}` : '--';
+            tr.innerHTML = `<td>${row.fecha||''}</td><td>${row.hora||''}</td><td>${q.toUpperCase()}</td><td>--</td><td>${loc}</td>`;
+            tbody.appendChild(tr);
+        });
+    }).catch(() => {});
 });
 
 document.getElementById('btn-export-csv').addEventListener('click', () => {
@@ -331,25 +412,21 @@ document.getElementById('btn-export-csv').addEventListener('click', () => {
 
 // --- Settings ---
 function loadSettings() {
-    fetch('/api/settings')
-        .then(r => r.json())
-        .then(data => {
-            document.getElementById('set-fps').value = data.fps || 10;
-            document.getElementById('set-fps-value').textContent = data.fps || 10;
-            document.getElementById('set-cooldown').value = data.cooldown || 300;
-            document.getElementById('set-log-all').checked = data.log_all !== false;
-            document.getElementById('set-sound').checked = data.sound !== false;
-            soundEnabled = data.sound !== false;
-
-            const status = document.getElementById('system-status');
-            status.innerHTML = `
-                <div>Estado: ${data.running ? 'Activo' : 'Detenido'}</div>
-                <div>Matriculas sesion: ${data.session_count || 0}</div>
-                <div>FPS real: ${data.actual_fps || 0}</div>
-                <div>GPS: ${data.gps_status || 'No disponible'}</div>
-            `;
-        })
-        .catch(() => {});
+    fetch('/api/settings').then(r => r.json()).then(data => {
+        document.getElementById('set-fps').value = data.fps || 10;
+        document.getElementById('set-fps-value').textContent = data.fps || 10;
+        document.getElementById('set-cooldown').value = data.cooldown || 300;
+        document.getElementById('set-log-all').checked = data.log_all !== false;
+        document.getElementById('set-sound').checked = data.sound !== false;
+        soundEnabled = data.sound !== false;
+        const status = document.getElementById('system-status');
+        status.innerHTML = `
+            <div>Estado: ${data.running ? 'Activo' : 'Detenido'}</div>
+            <div>Matriculas sesion: ${data.session_count || 0}</div>
+            <div>GPS: ${data.gps_status || 'No disponible'}</div>
+            <div>OCR: Tesseract.js (navegador)</div>
+        `;
+    }).catch(() => {});
 }
 
 document.getElementById('set-fps').addEventListener('input', (e) => {
@@ -357,215 +434,51 @@ document.getElementById('set-fps').addEventListener('input', (e) => {
 });
 
 document.getElementById('set-camera').addEventListener('change', (e) => {
-    const urlInput = document.getElementById('set-camera-url');
-    urlInput.classList.toggle('hidden', e.target.value !== 'ip');
+    document.getElementById('set-camera-url').classList.toggle('hidden', e.target.value !== 'ip');
 });
 
 document.getElementById('btn-save-settings').addEventListener('click', () => {
-    const cameraSelect = document.getElementById('set-camera');
-    let cameraSource = cameraSelect.value;
-    if (cameraSource === 'ip') {
-        cameraSource = document.getElementById('set-camera-url').value;
-    }
-
     fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            camera_source: cameraSource,
             fps: parseInt(document.getElementById('set-fps').value),
             cooldown: parseInt(document.getElementById('set-cooldown').value),
             log_all: document.getElementById('set-log-all').checked,
             sound: document.getElementById('set-sound').checked,
         })
-    })
-    .then(() => {
+    }).then(() => {
         soundEnabled = document.getElementById('set-sound').checked;
         loadSettings();
-    })
-    .catch(() => {});
+    }).catch(() => {});
 });
 
-// --- Training ---
+// --- Training (simplified) ---
 let currentTrainingFilter = '';
-
-const REASON_LABELS = {
-    'ocr_failed': 'OCR fallo',
-    'invalid_format': 'Formato invalido',
-    'low_confidence': 'Baja confianza',
-    'random_sample': 'Muestreo aleatorio',
-    'manual': 'Manual',
-};
+const REASON_LABELS = {'ocr_failed':'OCR fallo','invalid_format':'Formato invalido','low_confidence':'Baja confianza','random_sample':'Muestreo','manual':'Manual','synthetic':'Sintetico'};
 
 function loadTraining() {
-    // Stats
-    fetch('/api/training/stats')
-        .then(r => r.json())
-        .then(data => {
-            const byReason = data.by_reason || {};
-            const reasonBreakdown = Object.entries(byReason)
-                .map(([k, v]) => `${REASON_LABELS[k] || k}: ${v}`)
-                .join(', ');
-            document.getElementById('training-stats').innerHTML = `
-                <strong>Dataset:</strong> ${data.total_images || 0} imagenes
-                (${data.verified || 0} verificadas, ${data.unverified || 0} pendientes)<br>
-                <strong>Reglas aprendidas:</strong> ${data.correction_rules || 0}
-                | Max: ${data.max_images || 5000}<br>
-                <span style="font-size:0.85em;color:var(--text-secondary)">${reasonBreakdown || 'Sin datos'}</span>
-            `;
-        })
-        .catch(() => {});
-
-    loadUnverified(currentTrainingFilter);
+    fetch('/api/training/stats').then(r => r.json()).then(data => {
+        document.getElementById('training-stats').innerHTML = `
+            <strong>Dataset:</strong> ${data.total_images||0} imagenes (${data.verified||0} verificadas)<br>
+            <strong>Reglas:</strong> ${data.correction_rules||0}
+        `;
+    }).catch(() => {});
 }
 
-function loadUnverified(reasonFilter) {
-    const url = '/api/training/unverified?limit=30' + (reasonFilter ? '&reason=' + reasonFilter : '');
-    fetch(url)
-        .then(r => r.json())
-        .then(items => {
-            const container = document.getElementById('corrections-list');
-            if (items.length === 0) {
-                container.innerHTML = '<p class="empty-msg">No hay lecturas pendientes de corregir</p>';
-                return;
-            }
-            container.innerHTML = '';
-            items.forEach(item => {
-                const reason = item.reason || 'manual';
-                const reasonLabel = REASON_LABELS[reason] || reason;
-                const div = document.createElement('div');
-                div.className = 'correction-item';
-                div.id = 'item-' + item.id;
-                div.innerHTML = `
-                    <img src="/api/training/image/${item.filename}" alt="Matricula">
-                    <div class="correction-info">
-                        <div>
-                            <span class="reason-badge reason-${reason}">${reasonLabel}</span>
-                            OCR: <span class="correction-ocr">${item.ocr_text || '???'}</span>
-                            <span style="color:var(--text-secondary);font-size:0.8em">(${(item.confidence * 100).toFixed(0)}%)</span>
-                        </div>
-                        <div class="correction-input">
-                            <input type="text" id="correct-${item.id}" placeholder="Escribe matricula correcta" value="${item.ocr_text || ''}" maxlength="12">
-                            <button class="btn btn-primary" onclick="submitCorrection('${item.id}')">OK</button>
-                            <button class="btn-discard" onclick="discardImage('${item.id}')">Descartar</button>
-                        </div>
-                    </div>
-                `;
-                container.appendChild(div);
-            });
-        })
-        .catch(() => {});
-}
-
-// Filter buttons
-document.querySelectorAll('.btn-filter').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentTrainingFilter = btn.dataset.filter;
-        loadUnverified(currentTrainingFilter);
-    });
-});
-
-function submitCorrection(imageId) {
-    const input = document.getElementById('correct-' + imageId);
-    const text = input.value.trim();
-    if (!text) return;
-
-    fetch('/api/training/correct', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_id: imageId, corrected_text: text })
-    })
-    .then(r => r.json())
-    .then(() => {
-        // Eliminar visualmente el item corregido
-        const item = document.getElementById('item-' + imageId);
-        if (item) item.remove();
-        loadTraining();
-    })
-    .catch(() => {});
-}
-
-function discardImage(imageId) {
-    fetch('/api/training/discard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_id: imageId })
-    })
-    .then(r => r.json())
-    .then(() => {
-        const item = document.getElementById('item-' + imageId);
-        if (item) item.remove();
-    })
-    .catch(() => {});
-}
-
-// Upload form
-document.getElementById('upload-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const fileInput = document.getElementById('upload-image');
-    const plateText = document.getElementById('upload-plate-text').value.trim();
-    const resultDiv = document.getElementById('upload-result');
-
-    if (!fileInput.files.length || !plateText) {
-        resultDiv.classList.remove('hidden');
-        resultDiv.textContent = 'Selecciona una imagen y escribe el texto de la matricula.';
-        return;
-    }
-
-    const formData = new FormData();
-    formData.append('image', fileInput.files[0]);
-    formData.append('plate_text', plateText);
-
-    fetch('/api/training/upload', {
-        method: 'POST',
-        body: formData
-    })
-    .then(r => r.json())
-    .then(data => {
-        resultDiv.classList.remove('hidden');
-        if (data.success) {
-            resultDiv.textContent = 'Imagen guardada correctamente para entrenamiento.';
-            fileInput.value = '';
-            document.getElementById('upload-plate-text').value = '';
-            loadTraining();
-        } else {
-            resultDiv.textContent = 'Error: ' + (data.error || 'desconocido');
-        }
-    })
-    .catch(() => {
-        resultDiv.classList.remove('hidden');
-        resultDiv.textContent = 'Error de conexion.';
-    });
-});
-
-// Learn button
 document.getElementById('btn-learn').addEventListener('click', () => {
-    const resultDiv = document.getElementById('learn-result');
-    resultDiv.classList.remove('hidden');
-    resultDiv.textContent = 'Analizando correcciones...';
-
-    fetch('/api/training/learn', { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-            if (data.status === 'success') {
-                resultDiv.textContent = `Aprendizaje completado: ${data.rules_count} reglas generadas a partir de ${data.dataset_size} imagenes.`;
-            } else {
-                resultDiv.textContent = 'No hay suficientes datos verificados para aprender. Sube y corrige mas imagenes.';
-            }
-            loadTraining();
-        })
-        .catch(() => {
-            resultDiv.textContent = 'Error al ejecutar aprendizaje.';
-        });
+    const r = document.getElementById('learn-result');
+    r.classList.remove('hidden');
+    r.textContent = 'Analizando...';
+    fetch('/api/training/learn', {method:'POST'}).then(r=>r.json()).then(data => {
+        document.getElementById('learn-result').textContent = data.status === 'success'
+            ? `${data.rules_count} reglas generadas` : 'No hay suficientes datos';
+    }).catch(() => {});
 });
 
 // --- Inicializacion ---
-socket.on('connect', () => {
-    console.log('Conectado al servidor MatriScan');
-});
+socket.on('connect', () => console.log('Conectado'));
+socket.on('disconnect', () => console.log('Desconectado'));
 
-socket.on('disconnect', () => {
-    console.log('Desconectado del servidor');
-});
+// Cargar Tesseract.js al iniciar
+initOCR();

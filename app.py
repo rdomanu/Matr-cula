@@ -1,31 +1,17 @@
-"""MatriScan - Servidor principal Flask con WebSocket para deteccion de matriculas."""
+"""MatriScan - Servidor Flask. El OCR corre en el navegador (Tesseract.js)."""
 
 import os
-import time
-import threading
 from datetime import datetime
 
-import numpy as np
-from PIL import Image
-from flask import Flask, render_template, Response, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file
 from flask_socketio import SocketIO
 
 import config
-from core.camera import Camera
-from core.detector import detect_all_plates, draw_detections
-from core.preprocessor import preprocess_for_easyocr as preprocess_plate_ocr
-from core.ocr_engine import read_plate, read_plate_cached, plate_cache
 from core.plate_validator import validate_plate, normalize_plate
 from core.alert_manager import AlertManager
 from core.detection_logger import DetectionLogger
 from core.gps_tracker import GPSTracker
-from training.collector import (
-    TrainingCollector,
-    CAPTURE_REASON_FAILED,
-    CAPTURE_REASON_INVALID,
-    CAPTURE_REASON_LOW_CONF,
-    CAPTURE_REASON_RANDOM,
-)
+from training.collector import TrainingCollector
 from training.trainer import PlateTrainer
 
 # --- Inicializar Flask ---
@@ -34,7 +20,6 @@ app.config["SECRET_KEY"] = config.SECRET_KEY
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
 # --- Componentes del sistema ---
-camera = Camera()
 alert_manager = AlertManager()
 detection_logger = DetectionLogger()
 gps_tracker = GPSTracker()
@@ -43,154 +28,87 @@ plate_trainer = PlateTrainer()
 
 # --- Estado global ---
 detection_running = False
-detection_thread = None
 log_all_plates = True
-annotated_frame = None
-frame_lock = threading.Lock()
-
-# --- Settings en memoria ---
 current_settings = {
     "fps": config.CAMERA_FPS,
     "cooldown": config.ALERT_COOLDOWN_SECONDS,
     "log_all": True,
     "sound": True,
-    "camera_source": config.CAMERA_SOURCE,
 }
 
 
-def detection_loop():
-    """Bucle principal de deteccion de matriculas."""
-    global detection_running, annotated_frame, log_all_plates
-
-    last_frame_id = 0
-
-    while detection_running:
-        frame = camera.read()
-        if frame is None:
-            time.sleep(0.2)
-            continue
-
-        # Evitar procesar el mismo frame dos veces
-        current_id = camera.frame_count
-        if current_id == last_frame_id:
-            time.sleep(0.1)
-            continue
-        last_frame_id = current_id
-
-        # Detectar matriculas (Tesseract escanea TODO el frame)
-        boxes, plate_images = detect_all_plates(frame)
-
-        texts = []
-        watchlist_plates = alert_manager.get_watchlist_plates()
-
-        for i, plate_img in enumerate(plate_images):
-            # Leer matricula con OCR del recorte
-            processed = preprocess_plate_ocr(plate_img)
-            raw_text, confidence = read_plate(processed if processed is not None else plate_img)
-
-            if raw_text is None:
-                texts.append("")
-                continue
-
-            validation = validate_plate(raw_text)
-            if validation is None:
-                texts.append("")
-                continue
-
-            plate_text = validation["plate"]
-            plate_normalized = validation["normalized"]
-            plate_type = validation["type"]
-
-            # Deduplicacion
-            if plate_cache.contains(plate_normalized):
-                texts.append(plate_text)
-                continue
-            plate_cache.add(plate_normalized)
-
-            texts.append(plate_text)
-
-            # GPS
-            lat, lon = gps_tracker.get_coords_str()
-
-            # Registrar en CSV
-            if log_all_plates:
-                detection_logger.log_detection(
-                    plate_text, plate_type, confidence, lat, lon
-                )
-
-            # Muestreo aleatorio para entrenamiento
-            if training_collector.should_random_sample():
-                training_collector.save_difficult_frame(
-                    plate_img, raw_text, confidence, CAPTURE_REASON_RANDOM
-                )
-
-            # Comprobar watchlist
-            is_alert = False
-            alert_data = alert_manager.check_and_alert(
-                plate_normalized, plate_img,
-                location=gps_tracker.get_location(),
-            )
-            if alert_data:
-                is_alert = True
-                socketio.emit("alert_triggered", alert_data)
-
-            # Notificar al frontend
-            socketio.emit("plate_detected", {
-                "plate": plate_text,
-                "type": plate_type,
-                "confidence": round(confidence, 2),
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "is_alert": is_alert,
-                "session_count": detection_logger.get_stats()["session_count"],
-            })
-
-        # Stats
-        socketio.emit("stats_update", {
-            "session_count": detection_logger.get_stats()["session_count"],
-            "fps": round(camera.fps_actual, 1),
-            "gps_status": "OK" if gps_tracker.has_fix else "Sin GPS",
-        })
-
-        # No procesar mas de ~2 frames/seg (Tesseract es lento)
-        time.sleep(0.5)
-
-
-def generate_video_feed():
-    """Generador MJPEG para streaming de video."""
-    while detection_running:
-        with frame_lock:
-            frame = annotated_frame
-
-        if frame is None:
-            time.sleep(0.05)
-            continue
-
-        from io import BytesIO
-        pil_img = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame
-        buf = BytesIO()
-        pil_img.save(buf, format="JPEG", quality=60)
-        frame_bytes = buf.getvalue()
-
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        )
-        time.sleep(1.0 / current_settings["fps"])
-
-
-# --- Rutas de pagina ---
+# --- Pagina principal ---
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-# --- API: Video feed ---
-@app.route("/api/video_feed")
-def video_feed():
-    return Response(
-        generate_video_feed(),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
+# --- WebSocket: el navegador envia matriculas detectadas ---
+@socketio.on("start_detection")
+def handle_start():
+    global detection_running
+    detection_running = True
+    gps_tracker.start()
+    socketio.emit("detection_started")
+
+
+@socketio.on("stop_detection")
+def handle_stop():
+    global detection_running
+    detection_running = False
+    gps_tracker.stop()
+    socketio.emit("detection_stopped")
+
+
+@socketio.on("plate_found")
+def handle_plate_found(data):
+    """Recibe una matricula detectada por el OCR del navegador."""
+    global log_all_plates
+
+    plate = data.get("plate", "")
+    normalized = data.get("normalized", "")
+    plate_type = data.get("type", "unknown")
+    confidence = data.get("confidence", 0)
+
+    if not normalized:
+        return
+
+    # Validar formato
+    validation = validate_plate(normalized)
+    if validation is None:
+        return
+
+    plate_text = validation["plate"]
+    plate_normalized = validation["normalized"]
+
+    # GPS
+    lat, lon = gps_tracker.get_coords_str()
+
+    # Registrar en CSV
+    if log_all_plates:
+        detection_logger.log_detection(
+            plate_text, plate_type, confidence, lat, lon
+        )
+
+    # Comprobar watchlist
+    is_alert = False
+    alert_data = alert_manager.check_and_alert(
+        plate_normalized, location=gps_tracker.get_location(),
     )
+    if alert_data:
+        is_alert = True
+        socketio.emit("alert_triggered", alert_data)
+
+    # Notificar a todos los clientes
+    socketio.emit("plate_detected", {
+        "plate": plate_text,
+        "type": plate_type,
+        "confidence": round(confidence, 2),
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "is_alert": is_alert,
+        "alias": alert_data["alias"] if alert_data else "",
+        "session_count": detection_logger.get_stats()["session_count"],
+    })
 
 
 # --- API: Watchlist ---
@@ -204,37 +122,27 @@ def add_to_watchlist():
     data = request.get_json()
     plate = data.get("plate", "").strip()
     alias = data.get("alias", "").strip()
-
     if not plate:
         return jsonify({"error": "Matricula requerida"}), 400
-
     normalized = normalize_plate(plate)
     added = alert_manager.add_plate(normalized, alias)
-
-    # Buscar en historico
     history = detection_logger.search_plate(normalized)
-
-    return jsonify({
-        "added": added,
-        "plate": normalized,
-        "history": history,
-    })
+    return jsonify({"added": added, "plate": normalized, "history": history})
 
 
 @app.route("/api/watchlist", methods=["DELETE"])
 def remove_from_watchlist():
     data = request.get_json()
     plate = data.get("plate", "").strip()
-    normalized = normalize_plate(plate)
-    removed = alert_manager.remove_plate(normalized)
+    removed = alert_manager.remove_plate(normalize_plate(plate))
     return jsonify({"removed": removed})
 
 
 @app.route("/api/watchlist/export")
 def export_watchlist():
-    content = alert_manager.export_watchlist()
+    from flask import Response
     return Response(
-        content,
+        alert_manager.export_watchlist(),
         mimetype="application/json",
         headers={"Content-Disposition": "attachment; filename=watchlist.json"},
     )
@@ -242,17 +150,14 @@ def export_watchlist():
 
 @app.route("/api/watchlist/import", methods=["POST"])
 def import_watchlist():
-    data = request.get_json()
-    alert_manager.import_watchlist(data)
+    alert_manager.import_watchlist(request.get_json())
     return jsonify({"success": True})
 
 
 # --- API: Historial ---
 @app.route("/api/history/recent")
 def history_recent():
-    limit = request.args.get("limit", 50, type=int)
-    detections = detection_logger.get_recent_detections(limit)
-    return jsonify(detections)
+    return jsonify(detection_logger.get_recent_detections(50))
 
 
 @app.route("/api/history/search")
@@ -260,24 +165,19 @@ def history_search():
     plate = request.args.get("plate", "")
     if not plate:
         return jsonify([])
-    normalized = normalize_plate(plate)
-    results = detection_logger.search_plate(normalized)
-    return jsonify(results)
+    return jsonify(detection_logger.search_plate(normalize_plate(plate)))
 
 
 @app.route("/api/history/files")
 def history_files():
-    files = detection_logger.get_csv_files()
-    return jsonify(files)
+    return jsonify(detection_logger.get_csv_files())
 
 
 @app.route("/api/history/export")
 def history_export():
-    """Exporta el CSV del dia actual."""
     stats = detection_logger.get_stats()
-    csv_path = stats["today_file"]
-    if os.path.exists(csv_path):
-        return send_file(csv_path, as_attachment=True)
+    if os.path.exists(stats["today_file"]):
+        return send_file(stats["today_file"], as_attachment=True)
     return jsonify({"error": "No hay datos de hoy"}), 404
 
 
@@ -285,14 +185,9 @@ def history_export():
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     return jsonify({
-        "fps": current_settings["fps"],
-        "cooldown": current_settings["cooldown"],
-        "log_all": current_settings["log_all"],
-        "sound": current_settings["sound"],
-        "camera_source": current_settings["camera_source"],
+        **current_settings,
         "running": detection_running,
         "session_count": detection_logger.get_stats()["session_count"],
-        "actual_fps": round(camera.fps_actual, 1) if detection_running else 0,
         "gps_status": "OK" if gps_tracker.has_fix else "No disponible",
     })
 
@@ -301,7 +196,6 @@ def get_settings():
 def update_settings():
     global log_all_plates
     data = request.get_json()
-
     if "fps" in data:
         current_settings["fps"] = max(3, min(15, int(data["fps"])))
     if "cooldown" in data:
@@ -312,9 +206,6 @@ def update_settings():
         log_all_plates = current_settings["log_all"]
     if "sound" in data:
         current_settings["sound"] = bool(data["sound"])
-    if "camera_source" in data:
-        current_settings["camera_source"] = data["camera_source"]
-
     return jsonify({"success": True})
 
 
@@ -324,144 +215,29 @@ def training_stats():
     return jsonify(plate_trainer.get_training_stats())
 
 
-@app.route("/api/training/unverified")
-def training_unverified():
-    limit = request.args.get("limit", 20, type=int)
-    reason = request.args.get("reason", None)
-    items = training_collector.get_unverified(limit, reason_filter=reason)
-    return jsonify(items)
-
-
-@app.route("/api/training/correct", methods=["POST"])
-def training_correct():
-    data = request.get_json()
-    image_id = data.get("image_id", "")
-    corrected_text = data.get("corrected_text", "")
-    if not image_id or not corrected_text:
-        return jsonify({"error": "image_id y corrected_text requeridos"}), 400
-    ok = training_collector.correct_label(image_id, corrected_text)
-    return jsonify({"success": ok})
-
-
 @app.route("/api/training/learn", methods=["POST"])
 def training_learn():
-    """Ejecuta el aprendizaje de reglas de correccion basado en las correcciones del usuario."""
-    result = plate_trainer.learn_corrections()
-    return jsonify(result)
-
-
-@app.route("/api/training/upload", methods=["POST"])
-def training_upload():
-    """Sube una imagen de matricula con su texto correcto para entrenamiento.
-
-    Acepta multipart/form-data con:
-    - image: archivo de imagen (JPG/PNG)
-    - plate_text: texto correcto de la matricula
-    """
-    if "image" not in request.files:
-        return jsonify({"error": "No se envio imagen"}), 400
-
-    file = request.files["image"]
-    plate_text = request.form.get("plate_text", "").strip().upper()
-
-    if not plate_text:
-        return jsonify({"error": "plate_text requerido"}), 400
-
-    # Leer imagen
-    try:
-        image = Image.open(file.stream).convert("RGB")
-        image = np.array(image)
-    except Exception:
-        image = None
-
-    if image is None:
-        return jsonify({"error": "Imagen no valida"}), 400
-
-    # Guardar para entrenamiento
-    image_id = training_collector.save_plate_image(image, plate_text, 1.0)
-    if image_id:
-        # Marcar como verificada directamente (el usuario ya dio el texto correcto)
-        training_collector.correct_label(image_id, plate_text)
-        return jsonify({"success": True, "image_id": image_id})
-
-    return jsonify({"error": "No se pudo guardar (limite alcanzado?)"}), 500
-
-
-@app.route("/api/training/discard", methods=["POST"])
-def training_discard():
-    """Descarta una imagen de entrenamiento (no es matricula, basura, etc.)."""
-    data = request.get_json()
-    image_id = data.get("image_id", "")
-    if not image_id:
-        return jsonify({"error": "image_id requerido"}), 400
-    ok = training_collector.discard_image(image_id)
-    return jsonify({"success": ok})
+    return jsonify(plate_trainer.learn_corrections())
 
 
 @app.route("/api/training/image/<filename>")
 def training_image(filename):
-    """Sirve una imagen de entrenamiento."""
     filepath = os.path.join(config.TRAINING_PLATES_DIR, filename)
     if os.path.exists(filepath):
         return send_file(filepath)
-    return jsonify({"error": "Imagen no encontrada"}), 404
-
-
-# --- WebSocket: Control de deteccion ---
-@socketio.on("start_detection")
-def handle_start():
-    global detection_running, detection_thread
-
-    if detection_running:
-        return
-
-    camera.start()
-    gps_tracker.start()
-
-    detection_running = True
-    detection_thread = threading.Thread(target=detection_loop, daemon=True)
-    detection_thread.start()
-
-    socketio.emit("detection_started")
-
-
-@socketio.on("camera_frame")
-def handle_frame(data):
-    """Recibe un frame de la camara del navegador (base64 JPEG)."""
-    if detection_running and data:
-        camera.receive_frame(data)
-
-
-@socketio.on("stop_detection")
-def handle_stop():
-    global detection_running
-
-    detection_running = False
-    camera.stop()
-    gps_tracker.stop()
-    plate_cache.clear()
-
-    socketio.emit("detection_stopped")
+    return jsonify({"error": "No encontrada"}), 404
 
 
 # --- Punto de entrada ---
 if __name__ == "__main__":
-    # Asegurar que existen los directorios de datos
     os.makedirs(config.DATA_DIR, exist_ok=True)
     os.makedirs(config.ALERTS_DIR, exist_ok=True)
     os.makedirs(config.TRAINING_PLATES_DIR, exist_ok=True)
 
-    # Verificar Tesseract
-    import shutil
-    if shutil.which("tesseract"):
-        print("  Tesseract OCR: OK")
-    else:
-        print("  AVISO: Tesseract no encontrado. Instala con: pkg install tesseract")
-
     print("=" * 50)
     print("  MatriScan - Lector de Matriculas Espanolas")
     print(f"  Servidor: http://{config.FLASK_HOST}:{config.FLASK_PORT}")
-    print("  Abre Chrome en esa direccion")
+    print("  OCR: Tesseract.js (corre en el navegador)")
     print("=" * 50)
 
     socketio.run(
